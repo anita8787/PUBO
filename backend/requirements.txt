@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+pydantic-settings
+python-multipart
+python-dotenv
+alembic
+psycopg2-binary
+pytest
+requests
+apify-client
+python-dotenv
+google-generativeai
+yt-dlp
+youtube-transcript-api
+
