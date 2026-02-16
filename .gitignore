@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.env
+
+# macOS
+.DS_Store
+
+# iOS / Xcode
+ios/DerivedData/
+ios/Build/
+ios/build/
+ios/*.xcodeproj/xcuserdata/
+ios/*.xcworkspace/xcuserdata/
+ios/Pubo.xcodeproj/project.xcworkspace/
+ios/Pubo.xcodeproj/xcuserdata/
