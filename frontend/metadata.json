@@ -1,0 +1,7 @@
+{
+  "name": "Copy of Pubo",
+  "description": "A social travel itinerary app that converts content into actionable plans.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
