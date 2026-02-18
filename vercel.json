@@ -3,7 +3,11 @@
     "rewrites": [
         {
             "source": "/api/(.*)",
-            "destination": "/api/$1"
+            "destination": "/backend/app/main.py"
+        },
+        {
+            "source": "/(.*)",
+            "destination": "/frontend/$1"
         }
     ],
     "builds": [
@@ -17,16 +21,6 @@
             "config": {
                 "distDir": "dist"
             }
-        }
-    ],
-    "routes": [
-        {
-            "src": "/api/(.*)",
-            "dest": "backend/app/main.py"
-        },
-        {
-            "src": "/(.*)",
-            "dest": "frontend/$1"
         }
     ]
 }
