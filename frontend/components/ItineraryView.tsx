@@ -241,7 +241,7 @@ const ItineraryView: React.FC<ItineraryViewProps> = ({
   const renderMapView = () => (
     <div className="h-screen w-full relative font-sans overflow-hidden bg-pubo-white">
       {/* Map Layer */}
-      <div className="absolute inset-0 z-0 bg-gray-50"><img src="https://lh3.googleusercontent.com/d/1cKI5B7O59vYFhtftmMjCz3bjnaWp-4E3" className="w-full h-full object-cover grayscale opacity-50" /></div>
+      <div className="absolute inset-0 z-0 bg-gray-50"><img src="https://images.unsplash.com/photo-1524661135-423995f22d0b?q=80&w=800&auto=format&fit=crop" className="w-full h-full object-cover grayscale opacity-50" /></div>
 
       {/* Top Floating Controls */}
       <div className="absolute top-12 left-6 right-6 z-40 flex items-center justify-between">
