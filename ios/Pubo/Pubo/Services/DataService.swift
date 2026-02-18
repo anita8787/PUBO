@@ -128,8 +128,8 @@ class DataService: ObservableObject {
     /// 從後端獲取任務結果並回傳供預覽 (Async/Await)
     /// 不再自動儲存，而是回傳資料讓 UI 決定
     func fetchTaskResult(taskId: String) async throws -> (Content, [ContentPlaceInfo])? {
-        // 使用 127.0.0.1 確保 IPv4 Loopback (因為 Share Extension 證實可用)
-        let urlString = "http://127.0.0.1:8000/api/v1/task/\(taskId)"
+        // 使用 Vercel Production URL
+        let urlString = "https://pubo-pink.vercel.app/api/v1/task/\(taskId)"
         guard let url = URL(string: urlString) else {
             throw URLError(.badURL)
         }
@@ -192,7 +192,7 @@ class DataService: ObservableObject {
     }
     
     // MARK: - Trip Planning API (Backend Phase 2)
-    private let baseURL = "http://127.0.0.1:8000/api/v1"
+    private let baseURL = "https://pubo-pink.vercel.app/api/v1"
     
     // Helper to decode dates correctly
     private var jsonDecoder: JSONDecoder {
