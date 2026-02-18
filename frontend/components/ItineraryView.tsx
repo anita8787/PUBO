@@ -323,7 +323,7 @@ const ItineraryView: React.FC<ItineraryViewProps> = ({
                         <div className="space-y-3">
                             {itineraryDays.slice(0, isOverviewExpanded ? undefined : 2).map((day, idx) => (
                                 <div key={idx} className="flex gap-3 text-[11px] font-black">
-                                    <span className="text-pubo-navy shrink-0">{day.date} {day.weekday.slice(1,2)} ></span>
+                                    <span className="text-pubo-navy shrink-0">{day.date} {day.weekday?.slice(1,2) || ''} &gt;</span>
                                     <span className="text-gray-400 truncate">{day.spots.map(s => s.name).join(' - ') || '尚未安排'}</span>
                                 </div>
                             ))}
