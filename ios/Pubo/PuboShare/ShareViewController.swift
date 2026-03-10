@@ -339,11 +339,21 @@ class ShareViewController: UIViewController {
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         
         URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                print("❌ [ShareExt] Network error: \(error.localizedDescription)")
+            }
+            if let httpResponse = response as? HTTPURLResponse {
+                print("📡 [ShareExt] Status Code: \(httpResponse.statusCode)")
+            }
+            
             if let data = data,
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let taskId = json["task_id"] as? String {
+                print("✅ [ShareExt] Success! Task ID: \(taskId)")
                 completion(taskId)
             } else {
+                let responseString = data.flatMap { String(data: $0, encoding: .utf8) } ?? "no data"
+                print("⚠️ [ShareExt] Failed to get task_id. Response: \(responseString)")
                 completion(UUID().uuidString)
             }
         }.resume()

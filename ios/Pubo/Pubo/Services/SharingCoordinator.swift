@@ -19,6 +19,7 @@ class SharingCoordinator: ObservableObject {
         
         do {
             // 1. 提交任務到後端
+            print("📤 [AGENT_VERIFIED_SharingCoordinator] Submitting task...")
             let taskId = try await submitTask(url: url)
             
             // 2. 輪詢任務狀態
@@ -42,19 +43,44 @@ class SharingCoordinator: ObservableObject {
     // --- 私有輔助函數 ---
     
     private func submitTask(url: URL) async throws -> String {
-        // 略：實作 URLSession POST /api/v1/share
-        // 為了展示邏輯，這裡回傳一個模擬 taskId
-        return "mock_task_id"
+        let urlString = "https://pubo-pink.vercel.app/api/v1/share"
+        guard let apiURL = URL(string: urlString) else {
+            throw URLError(.badURL)
+        }
+        
+        var request = URLRequest(url: apiURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        // Backend expects {"url": "..."}
+        let payload = ["url": url.absoluteString]
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
+        
+        // Parse the taskId from {"task_id": "..."}
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        
+        struct ShareResponse: Decodable {
+            let taskId: String
+        }
+        
+        let shareResponse = try decoder.decode(ShareResponse.self, from: data)
+        return shareResponse.taskId
     }
     
     private func pollTaskStatus(taskId: String) async throws -> ExtractionResponse {
-        // 略：實作輪詢邏輯 (每一秒檢查一次 /api/v1/task/{id})
-        // 模擬成功返回
-        let mockContent = Content(id: 1, sourceType: .instagram, sourceUrl: "...", title: "模擬標籤", text: "...", authorName: "...", authorAvatarUrl: nil, previewThumbnailUrl: nil, publishedAt: nil, userTags: [])
-        let mockSuggestions = [
-            ContentPlaceInfo(place: Place(id: nil, placeId: "temp_1", name: "台北101", address: nil, latitude: 0, longitude: 0, category: nil, rating: nil, userRatingCount: nil, openNow: nil, openingHours: nil), evidenceText: "提到台北101", confidenceScore: 0.9)
-        ]
-        return ExtractionResponse(content: mockContent, suggestedPlaces: mockSuggestions)
+        // Use DataService to poll the real backend result
+        guard let (content, suggestedPlaces) = await DataService.shared.pollTaskResult(taskId: taskId) else {
+            throw NSError(domain: "PuboError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Task failed or timed out"])
+        }
+        
+        return ExtractionResponse(content: content, suggestedPlaces: suggestedPlaces)
     }
 }
 

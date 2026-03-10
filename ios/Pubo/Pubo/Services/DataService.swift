@@ -133,23 +133,41 @@ class DataService: ObservableObject {
         guard let url = URL(string: urlString) else {
             throw URLError(.badURL)
         }
-        print("🔗 [DataService] Fetching: \(urlString)")
+        print("🔗 [AGENT_VERIFIED_DataService] Fetching: \(urlString)")
         
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.setValue("close", forHTTPHeaderField: "Connection") // 避免 Keep-Alive 問題
-        request.timeoutInterval = 10
+        request.setValue("close", forHTTPHeaderField: "Connection")
+        request.timeoutInterval = 20  // 增加到 20 秒，容忍 Vercel 冷啟動
         
         // 使用 async API
         let (data, response) = try await URLSession.shared.data(for: request)
         
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        
+        // 偵錯日誌：顯示伺服器狀態碼
+        print("📡 [DataService] Server Response Status: \(httpResponse.statusCode)")
+        
+        if httpResponse.statusCode == 404 {
+            // 任務尚未進入資料庫 (後端延遲)
+            print("⏳ [DataService] Task not found on server yet (404).")
+            return nil
+        }
+        
+        if httpResponse.statusCode == 500 {
+            print("❌ [DataService] Server Error (500). Please check Vercel Logs.")
+            throw NSError(domain: "PuboError", code: 500, userInfo: [NSLocalizedDescriptionKey: "伺服器發生錯誤 (500)，請檢查後端配置。"])
+        }
+        
+        guard httpResponse.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
         
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601 // 必須設定，因為 Python Pydantic 預設回傳 ISO String
-        decoder.keyDecodingStrategy = .convertFromSnakeCase // 重要：Python (snake_case) -> Swift (camelCase)
+        decoder.dateDecodingStrategy = .iso8601
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
         
         let taskResponse = try decoder.decode(TaskResponse.self, from: data)
         
@@ -159,14 +177,14 @@ class DataService: ObservableObject {
             throw NSError(domain: "PuboError", code: -1, userInfo: [NSLocalizedDescriptionKey: taskResponse.error ?? "Task failed"])
         } else {
             // Pending or Processing
-            throw NSError(domain: "PuboError", code: -2, userInfo: [NSLocalizedDescriptionKey: "Task is still processing..."])
+            throw NSError(domain: "PuboError", code: -2, userInfo: [NSLocalizedDescriptionKey: "任務處理中..."])
         }
     }
     
     /// 輪詢任務直到完成或失敗 (適合處理 YouTube/Threads 等長任務)
     /// Default: 90 retries * 2s = 180s (3 minutes)
     func pollTaskResult(taskId: String, maxRetries: Int = 90) async -> (Content, [ContentPlaceInfo])? {
-        print("🔄 Start polling for task: \(taskId)")
+        print("🔄 [AGENT_VERIFIED_DataService] Start polling for task: \(taskId)")
         var attempts = 0
         
         while attempts < maxRetries {

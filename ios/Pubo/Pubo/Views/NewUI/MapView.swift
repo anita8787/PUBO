@@ -1,6 +1,10 @@
 import SwiftUI
 import MapKit
 
+enum APIError: Error {
+    case invalidURL
+}
+
 struct MapView: View {
     @State private var position: MapCameraPosition = .region(MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 25.0330, longitude: 121.5654), // Taipei
@@ -762,7 +766,17 @@ struct PlaceDetailCard: View {
         
         Task {
             do {
-                let url = URL(string: "http://127.0.0.1:8000/api/v1/analyze/place")!
+                // FIXME: Backend AI Analysis Endpoint
+                // We shouldn't use hardcoded localhost in production iOS app.
+                // It should either use Config.baseURL + "/api/v1/analyze/place"
+                // or similar, so it works natively without require local python server
+                // let url = URL(string: "http://127.0.0.1:8000/api/v1/analyze/place")!
+                let urlString = "https://pubo-pink.vercel.app/api/v1/analyze/place"
+                
+                guard let url = URL(string: urlString) else {
+                    throw APIError.invalidURL
+                }
+                
                 var request = URLRequest(url: url)
                 request.httpMethod = "POST"
                 request.addValue("application/json", forHTTPHeaderField: "Content-Type")
