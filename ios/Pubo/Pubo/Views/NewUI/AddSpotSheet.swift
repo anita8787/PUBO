@@ -7,7 +7,7 @@ struct AddSpotSheet: View {
     // Callback to Parent
     var onAddSpot: (ItinerarySpot) -> Void
     
-    @StateObject private var searchService = SearchService(apiKey: "")
+    @StateObject private var searchService = SearchService(apiKey: Secrets.googleAPIKey)
     
     // UI State
     @State private var searchText = ""

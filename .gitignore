@@ -15,3 +15,6 @@ ios/*.xcodeproj/xcuserdata/
 ios/*.xcworkspace/xcuserdata/
 ios/Pubo.xcodeproj/project.xcworkspace/
 ios/Pubo.xcodeproj/xcuserdata/
+
+# Secrets
+ios/Pubo/Pubo/Secrets.swift

@@ -302,7 +302,7 @@ struct MapSearchOverlay: View {
     @Binding var isPresented: Bool
     var onSelect: (MapPlace) -> Void
     @State private var searchText = ""
-    @StateObject private var searchService = SearchService(apiKey: "")
+    @StateObject private var searchService = SearchService(apiKey: Secrets.googleAPIKey)
     
     struct PopularDestination: Identifiable {
         let id = UUID()
