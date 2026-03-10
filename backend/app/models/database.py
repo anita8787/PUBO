@@ -142,7 +142,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./pubo.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    # On Vercel, the filesystem is read-only. We must use /tmp for SQLite to avoid crashing.
+    if os.environ.get("VERCEL"):
+        DATABASE_URL = "sqlite:////tmp/pubo.db"
+    else:
+        DATABASE_URL = "sqlite:///./pubo.db"
+
 # SQLite 特定設定 (check_same_thread)
 connect_args = {"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
 
