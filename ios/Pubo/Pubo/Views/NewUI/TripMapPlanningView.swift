@@ -67,7 +67,7 @@ struct TripMapPlanningView: View {
                     }
                     return nil
                 })
-                .stroke(Color(hex: "FFC649").opacity(0.4), lineWidth: 3, antialiased: true)
+                .stroke(Color(hex: "FFC649").opacity(0.4), lineWidth: 3)
             }
         }
         .mapStyle(.standard(elevation: .realistic))
@@ -102,9 +102,12 @@ struct TripMapPlanningView: View {
                 // Skip invalid 0,0
                 if startCoord.lat == 0 || endCoord.lat == 0 { continue }
                 
+                let startLocation = CLLocationCoordinate2D(latitude: startCoord.lat, longitude: startCoord.long)
+                let endLocation = CLLocationCoordinate2D(latitude: endCoord.lat, longitude: endCoord.long)
+                
                 let request = MKDirections.Request()
-                request.source = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: startCoord.lat, longitude: startCoord.long)))
-                request.destination = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: endCoord.lat, longitude: endCoord.long)))
+                request.source = MKMapItem(placemark: MKPlacemark(coordinate: startLocation))
+                request.destination = MKMapItem(placemark: MKPlacemark(coordinate: endLocation))
                 
                 // Determine transport type based on spot preference or default to automobile
                 switch spots[i].travelMode {
