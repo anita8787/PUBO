@@ -22,6 +22,7 @@ struct TripMapPlanningView: View {
         case overview, daily
     }
     
+    @State private var routes: [MKRoute] = [] // 真實導航路線條
 
     
     var body: some View {
@@ -52,27 +53,79 @@ struct TripMapPlanningView: View {
                 }
             }
             
-            // 路線圖 (Polylines)
-            if spots.count >= 2 {
+            // 路線圖 (Real Road Routes)
+            if !routes.isEmpty {
+                ForEach(routes, id: \.self) { route in
+                    MapPolyline(route)
+                        .stroke(Color(hex: "FFC649").opacity(0.8), lineWidth: 5)
+                }
+            } else if spots.count >= 2 {
+                // Fallback to straight lines if routes are not yet loaded
                 MapPolyline(coordinates: spots.compactMap { spot in
                     if let coord = spot.coordinate {
                         return CLLocationCoordinate2D(latitude: coord.lat, longitude: coord.long)
                     }
                     return nil
                 })
-                .stroke(Color(hex: "FFC649").opacity(0.8), lineWidth: 5) // 強化黃色路徑
+                .stroke(Color(hex: "FFC649").opacity(0.4), lineWidth: 3, antialiased: true)
             }
         }
         .mapStyle(.standard(elevation: .realistic))
         .ignoresSafeArea()
         .onAppear {
             updateMapToFitSpots()
+            calculateRoutes()
         }
         .onChange(of: selectedDayIndex) {
             updateMapToFitSpots()
+            calculateRoutes()
         }
         .onChange(of: spots.count) {
             updateMapToFitSpots()
+            calculateRoutes()
+        }
+    }
+    
+    private func calculateRoutes() {
+        guard spots.count >= 2 else {
+            self.routes = []
+            return
+        }
+        
+        Task {
+            var newRoutes: [MKRoute] = []
+            
+            for i in 0..<(spots.count - 1) {
+                guard let startCoord = spots[i].coordinate,
+                      let endCoord = spots[i+1].coordinate else { continue }
+                
+                // Skip invalid 0,0
+                if startCoord.lat == 0 || endCoord.lat == 0 { continue }
+                
+                let request = MKDirections.Request()
+                request.source = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: startCoord.lat, longitude: startCoord.long)))
+                request.destination = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: endCoord.lat, longitude: endCoord.long)))
+                
+                // Determine transport type based on spot preference or default to automobile
+                switch spots[i].travelMode {
+                case .walk: request.transportType = .walking
+                default: request.transportType = .automobile // Apple directions only support auto/walking/transit/any
+                }
+                
+                let directions = MKDirections(request: request)
+                do {
+                    let response = try await directions.calculate()
+                    if let route = response.routes.first {
+                        newRoutes.append(route)
+                    }
+                } catch {
+                    print("❌ Error fetching route for segment \(i): \(error)")
+                }
+            }
+            
+            await MainActor.run {
+                self.routes = newRoutes
+            }
         }
     }
     

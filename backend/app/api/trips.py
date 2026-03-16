@@ -15,7 +15,9 @@ from sqlalchemy.orm import joinedload
 
 @router.get("/trips", response_model=List[schemas.TripResponse])
 def get_trips(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    trips = db.query(Trip).order_by(Trip.start_date.desc()).offset(skip).limit(limit).all()
+    trips = db.query(Trip).options(
+        joinedload(Trip.days)
+    ).order_by(Trip.start_date.desc()).offset(skip).limit(limit).all()
     return trips
 
 @router.post("/trips", response_model=schemas.TripResponse)

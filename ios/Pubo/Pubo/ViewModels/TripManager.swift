@@ -139,8 +139,20 @@ class TripManager: ObservableObject {
     }
     
     func addSpot(to tripId: String, dayIndex: Int, spot: ItinerarySpot) {
-        guard let dayList = days[tripId], dayIndex < dayList.count else { return }
+        print("➕ [TripManager] addSpot: Trip(\(tripId)) DayIndex(\(dayIndex)) Spot(\(spot.name))")
+        
+        guard let dayList = days[tripId] else {
+            print("❌ [TripManager] Error: No days found for tripId \(tripId)")
+            return 
+        }
+        
+        guard dayIndex < dayList.count else {
+            print("❌ [TripManager] Error: dayIndex \(dayIndex) out of bounds (count: \(dayList.count))")
+            return 
+        }
+        
         let dayId = dayList[dayIndex].id
+        print("📍 [TripManager] Target DayId: \(dayId)")
         
         Task {
             do {

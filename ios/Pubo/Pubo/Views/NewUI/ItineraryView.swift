@@ -28,6 +28,12 @@ struct ItineraryView: View {
                 })
             }
         }
+        .onChange(of: selectedTripId) { _, newValue in
+            // Reset day selection when switching trips to avoid index out of bounds
+            if newValue != nil {
+                selectedDayIndex = 0
+            }
+        }
     }
 }
 
