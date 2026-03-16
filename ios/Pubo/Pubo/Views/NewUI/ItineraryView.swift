@@ -815,9 +815,12 @@ struct TripDetailView: View {
     func formatLocation(_ spot: ItinerarySpot) -> String {
         // Priority: Coordinate > Address > Name
         if let lat = spot.latitude, let lon = spot.longitude {
-            return "\(lat),\(lon)"
+            // Only use coordinates if they are valid (not 0.0, 0.0)
+            if lat != 0.0 && lon != 0.0 {
+                return "\(lat),\(lon)"
+            }
         }
-        // Fallback to name
+        // Fallback to name (URL encoded automatically by URLComponents)
         return spot.name
     }
     

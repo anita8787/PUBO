@@ -193,6 +193,8 @@ struct ItinerarySpot: Identifiable, Codable {
     
     var coordinate: Coordinate? {
         if let lat = latitude, let long = longitude {
+            // Filter out 0.0, 0.0 as invalid
+            if lat == 0.0 && long == 0.0 { return nil }
             return Coordinate(lat: lat, long: long)
         }
         return nil

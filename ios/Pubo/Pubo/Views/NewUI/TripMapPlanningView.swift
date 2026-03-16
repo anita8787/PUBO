@@ -87,9 +87,15 @@ struct TripMapPlanningView: View {
         }
         
         guard !coords.isEmpty else {
-            // 預設中心點 (例如東京) 以免看到海面
-            let defaultCenter = CLLocationCoordinate2D(latitude: 35.6895, longitude: 139.6917)
-            position = .region(MKCoordinateRegion(center: defaultCenter, span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05)))
+            // Priority: Korea if destination contains SEOUL/KOREA, else default center
+            var center = CLLocationCoordinate2D(latitude: 35.6895, longitude: 139.6917) // Tokyo default
+            if trip.destination?.lowercased().contains("korea") == true || 
+               trip.destination?.lowercased().contains("seoul") == true ||
+               trip.destination?.lowercased().contains("韓國") == true ||
+               trip.destination?.lowercased().contains("首爾") == true {
+                center = CLLocationCoordinate2D(latitude: 37.5665, longitude: 126.9780) // Seoul
+            }
+            position = .region(MKCoordinateRegion(center: center, span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)))
             return 
         }
         

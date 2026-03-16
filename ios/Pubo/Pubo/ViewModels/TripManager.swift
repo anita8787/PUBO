@@ -652,8 +652,18 @@ class TripManager: ObservableObject {
                         print("🛠 Repairing coordinates for: \(spot.name) (isZero: \(isZero), isNil: \(isNil))")
                         
                         do {
+                            // Clean the query: Remove parentheses and content within (e.g., "(弘大店)")
+                            var cleanQuery = spot.name
+                            if let range = cleanQuery.range(of: " (") {
+                                cleanQuery = String(cleanQuery[..<range.lowerBound])
+                            } else if let range = cleanQuery.range(of: "(") {
+                                cleanQuery = String(cleanQuery[..<range.lowerBound])
+                            }
+                            
+                            print("🛠 MapKit Searching: '\(cleanQuery)' (Original: '\(spot.name)')")
+                            
                             // Use MapKit to find the place
-                            let results = try await resolver.resolvePOI(query: spot.name)
+                            let results = try await resolver.resolvePOI(query: cleanQuery)
                             if let firstMatch = results.first {
                                 var updatedSpot = spot
                                 updatedSpot.latitude = firstMatch.latitude
@@ -663,7 +673,7 @@ class TripManager: ObservableObject {
                                 self.updateSpot(tripId: tripId, dayIndex: dayIndex, spot: updatedSpot)
                                 print("✅ Repaired \(spot.name) -> \(firstMatch.latitude), \(firstMatch.longitude)")
                             } else {
-                                print("⚠️ Could not find MapKit results for: \(spot.name)")
+                                print("⚠️ Could not find MapKit results for: \(cleanQuery)")
                             }
                         } catch {
                             print("❌ Error repairing coordinates for \(spot.name): \(error)")
