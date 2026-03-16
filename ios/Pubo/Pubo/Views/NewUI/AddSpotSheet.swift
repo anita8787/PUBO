@@ -4,8 +4,8 @@ import SwiftData
 struct AddSpotSheet: View {
     @Environment(\.dismiss) var dismiss
     
-    // Callback to Parent
-    var onAddSpot: (ItinerarySpot) -> Void
+    // Callback to Parent (Spot, Optional Start Date, Optional End Date for Multi-day)
+    var onAddSpot: (ItinerarySpot, Date?, Date?) -> Void
     
     @StateObject private var searchService = SearchService(apiKey: Secrets.googleAPIKey)
     
@@ -166,20 +166,19 @@ struct AddSpotSheet: View {
         .sheet(item: $activeSheet) { mode in
             switch mode {
             case .smartImport:
-                SmartImportView(onDismiss: { activeSheet = nil })
+                SmartImportView(onAddSpot: { spot, start, end in
+                    onAddSpot(spot, start, end)
+                }, onDismiss: { activeSheet = nil })
             case .accommodation:
-                AccommodationPopupView(onAdd: { name in
-                    var spot = ItinerarySpot.empty()
-                    spot.name = name
-                    spot.category = .accommodation
-                    onAddSpot(spot)
+                AccommodationPopupView(onAdd: { spot, start, end in
+                    onAddSpot(spot, start, end)
                     activeSheet = nil
                     dismiss()
                 })
             case .collection:
                 SavedPlacesResultView(sdContents: sdContents, onAdd: { selectedSpots in
                     for spot in selectedSpots {
-                        onAddSpot(spot)
+                        onAddSpot(spot, nil, nil)
                     }
                     activeSheet = nil
                     dismiss()
@@ -198,7 +197,7 @@ struct AddSpotSheet: View {
                     spot.latitude = details.lat
                     spot.longitude = details.lng
                     spot.googlePlaceId = result.source == .google ? result.placeId : nil
-                    onAddSpot(spot)
+                    onAddSpot(spot, nil, nil)
                     dismiss()
                 }
             } catch {
@@ -207,7 +206,7 @@ struct AddSpotSheet: View {
                 await MainActor.run {
                     var spot = ItinerarySpot.empty()
                     spot.name = result.title
-                    onAddSpot(spot)
+                    onAddSpot(spot, nil, nil)
                     dismiss()
                 }
             }
@@ -220,7 +219,7 @@ struct AddSpotSheet: View {
         var spot = ItinerarySpot.empty()
         spot.name = searchText
         spot.category = category
-        onAddSpot(spot)
+        onAddSpot(spot, nil, nil)
         
         searchText = ""
         dismiss()
@@ -279,8 +278,12 @@ struct FunctionButton: View {
 
 // 1. Smart Import View
 struct SmartImportView: View {
+    var onAddSpot: (ItinerarySpot, Date?, Date?) -> Void
     var onDismiss: () -> Void
+    
     @State private var linkText = ""
+    @State private var isProcessing = false
+    @State private var errorMessage: String? = nil
     
     var body: some View {
         ZStack {
@@ -307,7 +310,23 @@ struct SmartImportView: View {
                         .cornerRadius(8)
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.3)))
                     
-                    Button("開始識別") { }
+                    if let error = errorMessage {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                    
+                    Button(action: handleSmartImport) {
+                        HStack {
+                            if isProcessing {
+                                ProgressView()
+                                    .tint(.black)
+                                    .padding(.trailing, 4)
+                            }
+                            Text(isProcessing ? "識別中..." : "開始識別")
+                        }
+                    }
+                    .disabled(isProcessing || linkText.isEmpty)
                     .font(.system(size: 14, weight: .bold))
                     .padding(.vertical, 8)
                     .padding(.horizontal, 16)
@@ -347,41 +366,370 @@ struct SmartImportView: View {
         .presentationDetents([.height(350)]) // Fixed lower height
         .presentationCornerRadius(32)
     }
+    
+    private func handleSmartImport() {
+        guard !linkText.isEmpty else { return }
+        
+        isProcessing = true
+        errorMessage = nil
+        
+        Task {
+            do {
+                // 1. Submit task
+                let taskId = try await DataService.shared.submitShareTask(url: linkText)
+                
+                // 2. Poll result
+                guard let result = await DataService.shared.pollTaskResult(taskId: taskId) else {
+                    await MainActor.run {
+                        self.errorMessage = "識別超時或失敗，請檢查連結"
+                        self.isProcessing = false
+                    }
+                    return
+                }
+                
+                // 3. Process results and add to itinerary
+                await MainActor.run {
+                    for info in result.1 {
+                        let place = info.place
+                        var spot = ItinerarySpot.empty()
+                        spot.name = place.name
+                        spot.latitude = place.latitude
+                        spot.longitude = place.longitude
+                        spot.googlePlaceId = place.googlePlaceId
+                        
+                        // Categories mapping
+                        if let cat = place.category?.lowercased() {
+                            if cat.contains("food") || cat.contains("restaurant") { spot.category = .food }
+                            else if cat.contains("lodging") || cat.contains("hotel") { spot.category = .accommodation }
+                            else if cat.contains("shopping") || cat.contains("store") { spot.category = .shopping }
+                            else { spot.category = .spot }
+                        }
+                        
+                        // Add Place Info for details
+                        let openHours: OpenHours? = nil
+                        // Note: Opening hours parsing from backend can be implemented here if needed
+                        
+                        spot.place = PlaceInfo(
+                            name: place.name,
+                            placeId: place.placeId,
+                            address: place.address,
+                            latitude: place.latitude,
+                            longitude: place.longitude,
+                            category: place.category,
+                            rating: place.rating,
+                            userRatingsTotal: place.userRatingCount,
+                            openingHours: openHours
+                        )
+                        
+                        onAddSpot(spot, nil, nil)
+                    }
+                    
+                    self.isProcessing = false
+                    onDismiss()
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = "解析錯誤: \(error.localizedDescription)"
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
 }
 
 // 2. Accommodation Popup
 struct AccommodationPopupView: View {
-    var onAdd: (String) -> Void
+    @Environment(\.dismiss) var dismiss
+    var onAdd: (ItinerarySpot, Date, Date) -> Void
+    
+    @StateObject private var searchService = SearchService(apiKey: Secrets.googleAPIKey)
     @State private var text = ""
+    @State private var isFetchingDetails = false
+    @State private var selectedSpot: ItinerarySpot? = nil
     
     var body: some View {
         ZStack {
             Color.white.ignoresSafeArea()
-            VStack(spacing: 20) {
-                Text("添加住宿")
-                    .font(.title2).bold()
-                    .padding(.top, 24)
-                
-                HStack {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.gray)
-                    TextField("搜尋住宿地點", text: $text)
-                        .onSubmit { onAdd(text) }
+            
+            if let spot = selectedSpot {
+                AccommodationDetailEditView(spot: spot, onAdd: { finalSpot, start, end in
+                    // Pass specific dates for accommodation
+                    onAdd(finalSpot, start, end)
+                }, onCancel: {
+                    selectedSpot = nil
+                })
+            } else {
+                VStack(spacing: 0) {
+                    Text("添加住宿")
+                        .font(.title3).bold()
+                        .padding(.top, 20)
+                        .padding(.bottom, 16)
+                    
+                    // Search Field
+                    HStack {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.gray)
+                        TextField("搜尋住宿飯店名稱", text: $text)
+                            .onChange(of: text) {
+                                searchService.updateQuery(text)
+                            }
+                        
+                        if isFetchingDetails {
+                            ProgressView().padding(.trailing, 4)
+                        }
+                    }
+                    .padding(12)
+                    .background(Color.gray.opacity(0.1))
+                    .cornerRadius(12)
+                    .padding(.horizontal)
+                    
+                    // Suggestions List
+                    if !searchService.suggestions.isEmpty {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 0) {
+                                ForEach(searchService.suggestions) { result in
+                                    Button(action: {
+                                        selectResult(result)
+                                    }) {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(result.title)
+                                                .font(.system(size: 14, weight: .bold))
+                                                .foregroundColor(.black)
+                                            Text(result.subtitle)
+                                                .font(.system(size: 12))
+                                                .foregroundColor(.gray)
+                                                .lineLimit(1)
+                                        }
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 10)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                    Divider().padding(.horizontal, 16)
+                                }
+                            }
+                        }
+                        .padding(.top, 8)
+                    } else {
+                        Spacer()
+                        if text.isEmpty {
+                            VStack(spacing: 8) {
+                                Image(systemName: "bed.double")
+                                    .font(.system(size: 40))
+                                    .foregroundColor(.gray.opacity(0.4))
+                                Text("輸入飯店名稱開始搜尋")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                            }
+                            .padding(.bottom, 40)
+                        }
+                        Spacer()
+                    }
                 }
-                .padding()
-                .background(Color.gray.opacity(0.1))
-                .cornerRadius(12)
-                .padding(.horizontal)
-                
-                Spacer()
             }
         }
-        .presentationDetents([.height(200)])
+        .presentationDetents(selectedSpot != nil ? [.large] : [.height(searchService.suggestions.isEmpty ? 220 : 450)])
         .presentationCornerRadius(32)
+    }
+    
+    private func selectResult(_ result: SearchResult) {
+        isFetchingDetails = true
+        Task {
+            do {
+                let details = try await searchService.getDetails(for: result)
+                await MainActor.run {
+                    var spot = ItinerarySpot.empty()
+                    spot.name = result.title
+                    spot.category = .accommodation
+                    spot.latitude = details.lat
+                    spot.longitude = details.lng
+                    spot.googlePlaceId = result.source == .google ? result.placeId : nil
+                    
+                    // Add Place Info
+                    spot.place = PlaceInfo(
+                        name: result.title,
+                        placeId: result.placeId,
+                        address: details.address,
+                        latitude: details.lat,
+                        longitude: details.lng,
+                        category: "lodging",
+                        rating: nil, 
+                        userRatingsTotal: nil,
+                        openingHours: nil
+                    )
+                    
+                    self.selectedSpot = spot
+                    isFetchingDetails = false
+                }
+            } catch {
+                print("❌ Failed to fetch accommodation details: \(error)")
+                await MainActor.run {
+                    var spot = ItinerarySpot.empty()
+                    spot.name = result.title
+                    spot.category = .accommodation
+                    self.selectedSpot = spot
+                    isFetchingDetails = false
+                }
+            }
+        }
     }
 }
 
-// 3. Collection (Real Data + Tags)
+struct AccommodationDetailEditView: View {
+    let spot: ItinerarySpot
+    var onAdd: (ItinerarySpot, Date, Date) -> Void
+    var onCancel: () -> Void
+    
+    @State private var checkInDate = Date()
+    @State private var checkOutDate = Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date()
+    @State private var notes = ""
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Button(action: onCancel) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundColor(.black)
+                }
+                Spacer()
+                Text("添加住宿")
+                    .font(.system(size: 18, weight: .bold))
+                Spacer()
+                Color.clear.frame(width: 24, height: 24)
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 24)
+            .padding(.bottom, 20)
+            
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    // Card
+                    VStack(alignment: .leading, spacing: 16) {
+                        // Title row
+                        HStack {
+                            Image(systemName: "bed.double.fill")
+                                .font(.system(size: 18))
+                            Text("住宿")
+                                .font(.system(size: 16, weight: .bold))
+                            Spacer()
+                            Button(action: onCancel) {
+                                Image(systemName: "trash")
+                                    .foregroundColor(.red)
+                            }
+                        }
+                        
+                        // Hotel Info
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(spot.name)
+                                .font(.system(size: 20, weight: .bold))
+                            Text(spot.place?.address ?? "")
+                                .font(.system(size: 14))
+                                .foregroundColor(.gray)
+                                .lineLimit(2)
+                        }
+                        
+                        Divider()
+                        
+                        // Dates
+                        VStack(alignment: .leading, spacing: 10) {
+                            let diff = Calendar.current.dateComponents([.day], from: checkInDate, to: checkOutDate).day ?? 1
+                            Text("住宿日期 (共\(max(1, diff))晚)")
+                                .font(.system(size: 13))
+                                .foregroundColor(.gray)
+                            
+                            HStack(spacing: 12) {
+                                DatePicker("", selection: $checkInDate, displayedComponents: .date)
+                                    .labelsHidden()
+                                    .environment(\.locale, Locale(identifier: "zh_Hant_TW"))
+                                
+                                Image(systemName: "arrow.right")
+                                    .foregroundColor(.gray)
+                                    .font(.system(size: 14))
+                                
+                                DatePicker("", selection: $checkOutDate, displayedComponents: .date)
+                                    .labelsHidden()
+                                    .environment(\.locale, Locale(identifier: "zh_Hant_TW"))
+                            }
+                        }
+                        
+                        Divider()
+                        
+                        // Notes
+                        HStack {
+                            Image(systemName: "pencil")
+                                .foregroundColor(.gray)
+                            TextField("添加備註", text: $notes)
+                                .font(.system(size: 15))
+                        }
+                    }
+                    .padding(20)
+                    .background(Color.white)
+                    .cornerRadius(24)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 24)
+                            .stroke(Color.gray.opacity(0.1), lineWidth: 1)
+                    )
+                    .padding(.horizontal, 20)
+                    
+                    // Add segment button (Placeholder as per UI)
+                    Button(action: {}) {
+                        HStack {
+                            Image(systemName: "plus")
+                            Text("新增一段住宿")
+                                .font(.system(size: 15, weight: .bold))
+                            Spacer()
+                        }
+                        .padding()
+                        .frame(maxWidth: .infinity)
+                        .background(Color.white)
+                        .cornerRadius(20)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 20)
+                                .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [4]))
+                                .foregroundColor(.gray.opacity(0.3))
+                        )
+                    }
+                    .padding(.horizontal, 20)
+                    .disabled(true) // Not implemented yet
+                }
+                .padding(.top, 10)
+            }
+            
+            // Bottom Action Button
+            Button(action: {
+                var finalSpot = spot
+                finalSpot.category = .accommodation // Ensure category is strictly accommodation
+                if !notes.isEmpty {
+                    finalSpot.notes = [notes]
+                }
+                
+                // Perform Add for all days in range
+                onAdd(finalSpot, checkInDate, checkOutDate)
+            }) {
+                HStack {
+                    let diff = Calendar.current.dateComponents([.day], from: checkInDate, to: checkOutDate).day ?? 1
+                    Text("共\(max(1, diff))晚")
+                        .font(.system(size: 14))
+                    Spacer()
+                    Text("添加到行程")
+                        .font(.system(size: 16, weight: .bold))
+                }
+                .padding(.horizontal, 24)
+                .frame(maxWidth: .infinity)
+                .frame(height: 60)
+                .background(Color.black)
+                .foregroundColor(.white)
+                .cornerRadius(30)
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 16)
+        }
+        .background(Color(white: 0.98).ignoresSafeArea())
+    }
+}
+
+// 3. Collection
 struct SavedPlacesResultView: View {
     let sdContents: [SDContent]
     var onAdd: ([ItinerarySpot]) -> Void

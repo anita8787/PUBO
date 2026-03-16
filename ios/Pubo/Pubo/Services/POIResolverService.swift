@@ -30,6 +30,7 @@ class POIResolverService {
                 rating: nil,
                 userRatingCount: nil,
                 openNow: nil,
+                googlePlaceId: nil,
                 openingHours: nil
             )
         }

@@ -128,11 +128,15 @@ struct AddToTripSheet: View {
             stayDuration: "60分鐘",
             notes: ["Added from Map"],
             imageUrl: place.image,
-            placeId: nil, // We don't have place_id from map mock data
+            placeId: nil,
+            googlePlaceId: nil,
             latitude: place.coordinate.latitude,
             longitude: place.coordinate.longitude,
             sortOrder: 0,
-            travelMode: .train
+            travelMode: .train,
+            travelTime: nil,
+            travelDistance: nil,
+            place: nil
         )
         
         tripManager.addSpot(to: tripId, dayIndex: dayIndex, spot: newSpot)

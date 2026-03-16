@@ -115,6 +115,8 @@ class SpotUpdate(BaseModel):
     travel_mode: Optional[str] = None
     travel_time: Optional[str] = None
     travel_distance: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 class SpotResponse(SpotBase):
     id: str

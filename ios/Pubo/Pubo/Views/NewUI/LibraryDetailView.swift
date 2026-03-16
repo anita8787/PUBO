@@ -16,7 +16,7 @@ struct LibraryDetailView: View {
                     Spacer()
                         .frame(height: 20)
 
-                    // 1. Header Info
+                    // 1. Header Info (Restored)
                     HStack {
                         Image(systemName: "star.fill")
                             .foregroundColor(PuboColors.yellow)
@@ -25,7 +25,7 @@ struct LibraryDetailView: View {
                             .foregroundColor(.black)
                     }
                     .padding(.horizontal, 24)
-                    
+
                     // 2. Main Post Card
                     HStack(alignment: .bottom, spacing: 16) {
                         // Left: Image
@@ -41,20 +41,22 @@ struct LibraryDetailView: View {
                         
                         // Right: Info
                         VStack(alignment: .leading, spacing: 10) {
-                            // Memo Button
-                            Button(action: { showingMemoSheet = true }) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "pencil")
-                                        .font(.system(size: 12))
-                                    Text(content.userNote?.isEmpty == false ? "編輯備註" : "添加備註")
-                                        .font(.system(size: 12, weight: .medium))
+                            // If no memo, show add button
+                            if content.userNote?.isEmpty != false {
+                                Button(action: { showingMemoSheet = true }) {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "pencil")
+                                            .font(.system(size: 12))
+                                        Text("添加備註")
+                                            .font(.system(size: 12, weight: .medium))
+                                    }
+                                    .foregroundColor(PuboColors.navy)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(
+                                        Capsule().stroke(PuboColors.navy, lineWidth: 1)
+                                    )
                                 }
-                                .foregroundColor(PuboColors.navy)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 4)
-                                .background(
-                                    Capsule().stroke(PuboColors.navy, lineWidth: 1)
-                                )
                             }
                             
                             // Platform & Share
@@ -87,6 +89,39 @@ struct LibraryDetailView: View {
                         }
                     }
                     .padding(.horizontal, 24)
+                    
+                    // 2.5 Memo Section (If exists, now below the post card)
+                    if let note = content.userNote, !note.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Image(systemName: "pencil.line")
+                                    .font(.system(size: 14))
+                                Text("我的備註")
+                                    .font(.system(size: 12, weight: .black))
+                                Spacer()
+                                Button(action: { showingMemoSheet = true }) {
+                                    Text("編輯")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundColor(PuboColors.navy)
+                                }
+                            }
+                            .foregroundColor(PuboColors.navy.opacity(0.6))
+                            
+                            Text(note)
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundColor(PuboColors.navy)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(12)
+                                .background(PuboColors.blue) // EBF2FF is light blue
+                                .cornerRadius(12)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12)
+                                        .stroke(PuboColors.navy.opacity(0.1), lineWidth: 1)
+                                )
+                        }
+                        .padding(.horizontal, 24)
+                        .padding(.top, -8) // Slight adjust to stay close to card
+                    }
                     
                     // 3. Spots List
                     LazyVStack(spacing: 16) {
@@ -241,7 +276,7 @@ extension SDContent {
         }
         
         if let txt = text, !txt.isEmpty {
-            return String(txt.prefix(10)) + (txt.count > 10 ? "..." : "")
+            return String(txt.prefix(15)) + (txt.count > 15 ? "..." : "")
         }
         
         return "無標題"

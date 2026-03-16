@@ -59,7 +59,7 @@ struct TripCardView: View {
                                 .foregroundColor(subTextColor)
                             
                             HStack(spacing: 4) {
-                                Image(systemName: "mappin.fill")
+                                Image(systemName: "mappin.and.ellipse")
                                     .font(.system(size: 10))
                                     .foregroundColor(subTextColor)
                                 Text("\(spotsCount) 個景點")

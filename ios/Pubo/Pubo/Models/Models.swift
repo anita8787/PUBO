@@ -155,7 +155,7 @@ struct PlaceInfo: Codable {
 }
 
 struct ItinerarySpot: Identifiable, Codable {
-    let id: String
+    var id: String
     var dayId: Int?
     var name: String
     var category: SpotCategory?
@@ -288,6 +288,8 @@ struct ItinerarySpot: Identifiable, Codable {
             longitude: nil,
             sortOrder: 0,
             travelMode: .train,
+            travelTime: nil,
+            travelDistance: nil,
             place: nil
         )
     }

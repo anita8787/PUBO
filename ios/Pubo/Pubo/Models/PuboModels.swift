@@ -38,7 +38,8 @@ struct Place: Identifiable, Codable {
     let rating: Double?
     let userRatingCount: Int?
     let openNow: Bool?
-    let openingHours: OpenHours?
+    var googlePlaceId: String? = nil
+    var openingHours: OpenHours? = nil
     
     var coordinate: CLLocationCoordinate2D {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)

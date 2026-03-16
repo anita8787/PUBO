@@ -79,13 +79,18 @@ async def process_share_task(task_id: str, url: str):
         import asyncio
         
         async def enrich_place(p):
-            place_name = p["name"]
+            # 優先使用在地化搜尋字串 (包含韓文/日文原文及國家名)
+            search_name = p.get("search_query", p["name"])
+            display_name = p["name"]
+            
+            print(f"🔍 [Backend] Searching for: {search_name} (Display: {display_name})")
+            
             # 使用 run_in_threadpool 確保同步的 search_place 不會阻塞 Event Loop
-            google_place = await run_in_threadpool(places_service.search_place, place_name)
+            google_place = await run_in_threadpool(places_service.search_place, search_name)
             
             place_data = {
                 "place_id": f"temp_{random.randint(1000, 9999)}",
-                "name": place_name,
+                "name": display_name,
                 "address": None,
                 "latitude": 0.0,
                 "longitude": 0.0,
@@ -99,7 +104,8 @@ async def process_share_task(task_id: str, url: str):
                 
                 place_data["place_id"] = real_id
                 place_data["google_place_id"] = real_id
-                place_data["name"] = google_place.get("displayName", {}).get("text", place_name)
+                # 依然優先使用 AI 解析出的繁體中文顯示名，除非 Google 提供確切名稱
+                # place_data["name"] = google_place.get("displayName", {}).get("text", display_name)
                 place_data["address"] = google_place.get("formattedAddress")
                 
                 location = google_place.get("location", {})

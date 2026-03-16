@@ -91,7 +91,7 @@ struct MapView: View {
                         do {
                             let response = try await search.start()
                             if let item = response.mapItems.first {
-                                address = item.placemark.title ?? feature.title ?? "未知地址"
+                                address = item.name ?? feature.title ?? "未知地址"
                             }
                         } catch {
                             address = feature.title ?? "未知地址"

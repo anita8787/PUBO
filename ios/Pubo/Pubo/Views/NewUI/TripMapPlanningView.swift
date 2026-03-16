@@ -34,9 +34,6 @@ struct TripMapPlanningView: View {
             
             // === 底部面板 ===
             bottomSheetPanel
-            
-            // === 底部面板 ===
-            bottomSheetPanel
         }
     }
     
@@ -63,7 +60,7 @@ struct TripMapPlanningView: View {
                     }
                     return nil
                 })
-                .stroke(Color(hex: "FFC649"), lineWidth: 4) // 黃色路徑
+                .stroke(Color(hex: "FFC649").opacity(0.8), lineWidth: 5) // 強化黃色路徑
             }
         }
         .mapStyle(.standard(elevation: .realistic))
@@ -84,10 +81,17 @@ struct TripMapPlanningView: View {
         
         let coords = spots.compactMap { spot -> CLLocationCoordinate2D? in
             guard let c = spot.coordinate else { return nil }
+            // Filter out invalid 0,0 coordinates to prevent Null Island center
+            if c.lat == 0.0 && c.long == 0.0 { return nil }
             return CLLocationCoordinate2D(latitude: c.lat, longitude: c.long)
         }
         
-        guard !coords.isEmpty else { return }
+        guard !coords.isEmpty else {
+            // 預設中心點 (例如東京) 以免看到海面
+            let defaultCenter = CLLocationCoordinate2D(latitude: 35.6895, longitude: 139.6917)
+            position = .region(MKCoordinateRegion(center: defaultCenter, span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05)))
+            return 
+        }
         
         // Calculate Bounding Box
         var minLat = 90.0
@@ -107,15 +111,19 @@ struct TripMapPlanningView: View {
             longitude: (minLon + maxLon) / 2
         )
         
-        let deltaLat = max(0.015, (maxLat - minLat) * 1.8)
-        let deltaLon = max(0.015, (maxLon - minLon) * 1.8)
+        let deltaLat = max(0.012, (maxLat - minLat) * 1.5)
+        let deltaLon = max(0.012, (maxLon - minLon) * 1.5)
+        
+        // 限制最大縮放，避免過大範圍
+        let finalDeltaLat = min(0.5, deltaLat)
+        let finalDeltaLon = min(0.5, deltaLon)
         
         let span = MKCoordinateSpan(
-            latitudeDelta: deltaLat,
-            longitudeDelta: deltaLon
+            latitudeDelta: finalDeltaLat,
+            longitudeDelta: finalDeltaLon
         )
         
-        withAnimation(.easeInOut(duration: 0.5)) {
+        withAnimation(.easeInOut(duration: 0.8)) {
             position = .region(MKCoordinateRegion(center: center, span: span))
         }
     }
@@ -125,16 +133,44 @@ struct TripMapPlanningView: View {
     // MARK: - 地圖標記
     @ViewBuilder
     private func mapMarker(for spot: ItinerarySpot, index: Int) -> some View {
-        ZStack {
-            Circle()
-                .fill(PuboColors.red)
-                .frame(width: 24, height: 24)
-                .overlay(Circle().stroke(Color.white, lineWidth: 2))
-                .shadow(color: .black.opacity(0.15), radius: 2, y: 1)
+        ZStack(alignment: .topTrailing) {
+            // Main Marker Circle
+            ZStack {
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 32, height: 32)
+                    .retroShadow(color: .black.opacity(0.1), offset: 2)
+                    .overlay(Circle().stroke(PuboColors.navy, lineWidth: 1.5))
+                
+                // Category Icon
+                categoryIcon(for: spot.category)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(PuboColors.navy)
+            }
             
-            Text("\(index + 1)")
-                .font(.system(size: 12, weight: .black))
-                .foregroundColor(.white)
+            // Index Badge (Small Red Circle)
+            ZStack {
+                Circle()
+                    .fill(PuboColors.red)
+                    .frame(width: 14, height: 14)
+                    .overlay(Circle().stroke(Color.white, lineWidth: 1))
+                
+                Text("\(index + 1)")
+                    .font(.system(size: 8, weight: .black))
+                    .foregroundColor(.white)
+            }
+            .offset(x: 4, y: -4)
+        }
+    }
+    
+    private func categoryIcon(for category: SpotCategory?) -> Image {
+        switch category {
+        case .food: return Image(systemName: "fork.knife")
+        case .accommodation: return Image(systemName: "house.fill")
+        case .shopping: return Image(systemName: "bag.fill")
+        case .attraction: return Image(systemName: "camera.fill")
+        case .spot: return Image(systemName: "mappin.and.ellipse")
+        default: return Image(systemName: "mappin.and.ellipse")
         }
     }
     
@@ -202,16 +238,16 @@ struct TripMapPlanningView: View {
             // 內容區域
             contentArea
         }
-        .frame(height: isConcise ? 280 : ScreenUtils.height * 0.58)
+        .frame(height: isConcise ? 310 : ScreenUtils.height * 0.58) // 摺疊時高度需足以顯示輪播卡片
         .background(Color(hex: "FDFAEE"))
         .clipShape(RoundedCorner(radius: 40, corners: [.topLeft, .topRight]))
         .overlay(
             RoundedCorner(radius: 40, corners: [.topLeft, .topRight])
                 .stroke(Color.black, lineWidth: 2)
         )
-        .shadow(color: .black.opacity(0.08), radius: 20, y: -10)
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: isConcise)
-        .id("day-\(selectedDayIndex)-\(spots.count)") // Force re-render when day or count changes
+        .shadow(color: .black.opacity(0.12), radius: 20, y: -10)
+        .animation(.spring(response: 0.45, dampingFraction: 0.8), value: isConcise)
+        // 移除強制重置視圖的 .id，避免添加景點後自動跳回總覽
     }
     
     // MARK: - 拖曳把手
@@ -235,7 +271,10 @@ struct TripMapPlanningView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 16) { // Reduced spacing for oval style
                 // 總覽 Tab
-                Button(action: { mapSubMode = .overview }) {
+                Button(action: {
+                    mapSubMode = .overview
+                    isConcise = false // 點擊總覽時自動展開面板
+                }) {
                     let isSelected = mapSubMode == .overview
                     Text("總覽")
                         .font(.system(size: 11, weight: .bold)) // Smaller font
@@ -321,7 +360,7 @@ struct TripMapPlanningView: View {
             }
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
-        .frame(height: 200) // 固定高度以適應版面
+        .frame(height: 240) // 調整高度以對應新的面板高度
     }
     
     private func conciseSpotCard(spot: ItinerarySpot, index: Int) -> some View {
@@ -547,7 +586,7 @@ struct TripMapPlanningView: View {
                     
                     // 交通資訊（非最後一個景點才顯示）
                     if index < spots.count - 1 {
-                        transportInfoRow
+                        transportInfoRow(for: spot)
                     }
                 }
             }
@@ -690,7 +729,7 @@ struct TripMapPlanningView: View {
         .transition(.opacity.combined(with: .move(edge: .top)))
     }
     
-    private var transportInfoRow: some View {
+    private func transportInfoRow(for spot: ItinerarySpot) -> some View {
         HStack(spacing: 8) {
             Rectangle()
                 .fill(Color.clear)
@@ -698,9 +737,9 @@ struct TripMapPlanningView: View {
             
             VStack {
                 Rectangle()
-                    .stroke(style: StrokeStyle(lineWidth: 2, dash: [4, 4]))
-                    .foregroundColor(Color.gray.opacity(0.2))
-                    .frame(width: 2, height: 32)
+                    .stroke(style: StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+                    .foregroundColor(Color.gray.opacity(0.15))
+                    .frame(width: 1.5, height: 32)
             }
             .padding(.leading, 0)
             

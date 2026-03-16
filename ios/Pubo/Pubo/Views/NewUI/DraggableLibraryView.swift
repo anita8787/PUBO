@@ -351,6 +351,19 @@ struct LibraryCard: View {
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
                 
+                // Memo Preview
+                if let note = content.userNote, !note.isEmpty {
+                    Text(note)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(PuboColors.navy)
+                        .lineLimit(1)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(PuboColors.blue)
+                        .cornerRadius(6)
+                        .padding(.top, 2)
+                }
+                
                 HStack(spacing: 6) {
                     // Platform Icon
                     content.platformIcon

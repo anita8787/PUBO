@@ -43,35 +43,7 @@ class SharingCoordinator: ObservableObject {
     // --- 私有輔助函數 ---
     
     private func submitTask(url: URL) async throws -> String {
-        let urlString = "https://pubo-pink.vercel.app/api/v1/share"
-        guard let apiURL = URL(string: urlString) else {
-            throw URLError(.badURL)
-        }
-        
-        var request = URLRequest(url: apiURL)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
-        // Backend expects {"url": "..."}
-        let payload = ["url": url.absoluteString]
-        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-        
-        let (data, response) = try await URLSession.shared.data(for: request)
-        
-        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-            throw URLError(.badServerResponse)
-        }
-        
-        // Parse the taskId from {"task_id": "..."}
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        
-        struct ShareResponse: Decodable {
-            let taskId: String
-        }
-        
-        let shareResponse = try decoder.decode(ShareResponse.self, from: data)
-        return shareResponse.taskId
+        return try await DataService.shared.submitShareTask(url: url.absoluteString)
     }
     
     private func pollTaskStatus(taskId: String) async throws -> ExtractionResponse {

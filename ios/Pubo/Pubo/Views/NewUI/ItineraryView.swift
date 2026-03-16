@@ -1,5 +1,6 @@
 import SwiftUI
 import MapKit
+import SwiftData
 
 struct ItineraryView: View {
     @EnvironmentObject var tripManager: TripManager
@@ -243,7 +244,7 @@ struct TripDetailView: View {
                     onShareClick: { withAnimation { showShareModal = true } }
                 )
                     .transition(.opacity)
-                    .toolbar(.hidden, for: .tabBar) // Hide Tab Bar in Map Mode
+                    .onAppear { isTabBarHidden = true } // 確保進入地圖時隱藏
             } else {
                 planningView // The List Planning View
             }
@@ -272,6 +273,10 @@ struct TripDetailView: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                             showLongImagePreview = true
                         }
+                    },
+                    onCollaborate: {
+                        withAnimation { showShareModal = false }
+                        // TODO: Handle collaboration
                     }
                 )
                     .zIndex(100)
@@ -288,10 +293,14 @@ struct TripDetailView: View {
                 
                 VStack {
                     Spacer()
-                    AddSpotSheet(onAddSpot: { newSpot in
+                    AddSpotSheet(onAddSpot: { newSpot, startDate, endDate in
                         // Perform Add
                         withAnimation {
-                            tripManager.addSpot(to: trip.id, dayIndex: selectedDayIndex, spot: newSpot)
+                            if let start = startDate, let end = endDate {
+                                tripManager.addAccommodation(to: trip.id, spot: newSpot, checkIn: start, checkOut: end)
+                            } else {
+                                tripManager.addSpot(to: trip.id, dayIndex: selectedDayIndex, spot: newSpot)
+                            }
                             isAddingSpotSheet = false
                         }
                     })
@@ -307,24 +316,10 @@ struct TripDetailView: View {
             TripSettingsView(tripId: trip.id)
         }
         .background(Color.white)
-        .toolbar((isMapMode || showShareModal) ? .hidden : .visible, for: .tabBar)
-        .onChange(of: isMapMode) {
-            withAnimation {
-                isTabBarHidden = isMapMode
-            }
-        }
-        .onChange(of: isAddingSpotSheet) {
-            withAnimation {
-                isTabBarHidden = isAddingSpotSheet
-            }
-        }
-        .onChange(of: showShareModal) {
-            withAnimation {
-                isTabBarHidden = showShareModal
-            }
-        }
         .onAppear {
-            isTabBarHidden = isMapMode || isAddingSpotSheet
+            isTabBarHidden = true // 進入此視圖一律隱藏 TabBar
+            // 自動掃描並修復失效的座標 (0,0)
+            tripManager.resolveInvalidCoordinates(in: trip.id)
         }
         .onDisappear {
             isTabBarHidden = false
@@ -351,13 +346,11 @@ struct TripDetailView: View {
         }
         // Replace Spot Sheet
         .sheet(item: $replaceSpotItem) { spot in
-            ReplaceSpotSheet(currentName: spot.name) { newName in
-                if let spotIndex = currentDaySpots.firstIndex(where: { $0.id == spot.id }) {
-                    tripManager.updateSpotName(tripId: trip.id, dayIndex: selectedDayIndex, spotIndex: spotIndex, newName: newName)
-                }
+            ReplaceSpotSheet(currentName: spot.name) { newSpot in
+                tripManager.replaceSpot(tripId: trip.id, dayIndex: selectedDayIndex, oldSpotId: spot.id, newSpot: newSpot)
                 replaceSpotItem = nil
             }
-            .presentationDetents([.medium])
+            .presentationDetents([.medium, .large])
             .presentationBackground(.white)
         }
         .confirmationDialog("行程過長，請選擇導航段落", isPresented: $showNavigationSheet, titleVisibility: .visible) {
@@ -594,12 +587,26 @@ struct TripDetailView: View {
                           sortingList
                       } else {
                           VStack(spacing: 24) { // Increased spacing between spots
-                              // New Vertical Flow: TimelineSpotView (contains SpotCard + Gap)
+                                let accommodations = currentDaySpots.filter { $0.category == .accommodation }
+                              let regularSpots = currentDaySpots.filter { $0.category != .accommodation }
                               
-                              ForEach(Array(currentDaySpots.enumerated()), id: \.element.id) { index, spot in
+                              // 1. Pinned Accommodation (If exists)
+                              if let hotel = accommodations.first {
+                                  PinnedAccommodationHeader(spot: hotel)
+                                      .padding(.horizontal, 24)
+                                  
+                                  // Show transport from hotel to first spot
+                                  if let firstSpot = regularSpots.first {
+                                      AccommodationToSpotGap(from: hotel, to: firstSpot)
+                                          .padding(.horizontal, 24)
+                                  }
+                              }
+                              
+                              // 2. Regular Spots
+                              ForEach(Array(regularSpots.enumerated()), id: \.element.id) { index, spot in
                                   TimelineSpotView(
                                       spot: spot,
-                                      isLast: index == currentDaySpots.count - 1,
+                                      isLast: index == regularSpots.count - 1,
                                       index: index,
                                       onEdit: {
                                           editingSpot = spot
@@ -702,6 +709,7 @@ struct TripDetailView: View {
                     Text("是否要取消目前的排序，恢復成您原本安排的順序？")
                 }
             }
+            .background(PuboColors.yellow)
 
             
             // === FLOATING MAP/LIST TOGGLE ===
@@ -1222,7 +1230,8 @@ struct SpotCardView: View {
             print("SpotCardView: ImageKey='\(spot.imageUrl ?? "nil")'")
             
             if (spot.imageUrl == nil || spot.imageUrl?.isEmpty == true),
-               let lat = spot.latitude, let lon = spot.longitude {
+               let lat = spot.latitude, let lon = spot.longitude,
+               lat != 0.0 || lon != 0.0 {
                 print("SpotCardView: Coordinates valid: \(lat), \(lon)")
                 if otmImageUrl == nil {
                     print("SpotCardView: Fetching OTM...")
@@ -1328,32 +1337,289 @@ struct MoveSpotSheet: View {
     }
 }
 
-// Reconstructed ReplaceSpotSheet
+// Reconstructed ReplaceSpotSheet — Search + Collection
 struct ReplaceSpotSheet: View {
     let currentName: String
-    var onReplace: (String) -> Void
+    var onReplace: (ItinerarySpot) -> Void
     @Environment(\.dismiss) var dismiss
-    @State private var newName = ""
+    
+    @StateObject private var searchService = SearchService(apiKey: Secrets.googleAPIKey)
+    @Query(sort: \SDContent.createdAt, order: .reverse) private var sdContents: [SDContent]
+    
+    @State private var searchText = ""
+    @State private var showCollection = false
+    @FocusState private var isSearchFocused: Bool
     
     var body: some View {
-        VStack(spacing: 20) {
-            Text("替換地點")
-                .font(.headline)
-                .padding(.top)
-            
-            TextField("輸入新地點名稱", text: $newName)
-                .textFieldStyle(.roundedBorder)
-                .padding()
-                .onAppear { newName = currentName }
-            
-            Button("確認替換") {
-                onReplace(newName)
-                dismiss()
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("替換地點")
+                    .font(.system(size: 18, weight: .bold))
+                Spacer()
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.gray)
+                        .frame(width: 28, height: 28)
+                        .background(Color.gray.opacity(0.1))
+                        .clipShape(Circle())
+                }
             }
-            .buttonStyle(.borderedProminent)
+            .padding(.horizontal, 20)
+            .padding(.top, 20)
+            .padding(.bottom, 12)
             
-            Spacer()
+            // Search Bar with Collection Icon
+            HStack(spacing: 10) {
+                // Collection icon button
+                Button(action: {
+                    withAnimation { showCollection.toggle() }
+                    if showCollection { isSearchFocused = false }
+                }) {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(showCollection ? PuboColors.yellow : .gray)
+                        .frame(width: 32, height: 32)
+                        .background(showCollection ? PuboColors.navy : Color.gray.opacity(0.1))
+                        .clipShape(Circle())
+                }
+                
+                // Search field
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.gray)
+                        .font(.system(size: 14))
+                    TextField("搜尋新地點", text: $searchText)
+                        .font(.system(size: 15))
+                        .focused($isSearchFocused)
+                        .onChange(of: searchText) {
+                            if !searchText.isEmpty { showCollection = false }
+                            searchService.updateQuery(searchText)
+                        }
+                    
+                    if !searchText.isEmpty {
+                        Button(action: {
+                            searchText = ""
+                            searchService.updateQuery("")
+                        }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.gray)
+                                .font(.system(size: 14))
+                        }
+                    }
+                }
+                .padding(10)
+                .background(Color.gray.opacity(0.08))
+                .cornerRadius(12)
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
+            
+            Divider().padding(.horizontal, 20)
+            
+            // Content: Search Results or Collection
+            if showCollection {
+                collectionListView
+            } else if !searchService.suggestions.isEmpty {
+                searchResultsView
+            } else {
+                // Empty state
+                VStack(spacing: 12) {
+                    Spacer()
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 36))
+                        .foregroundColor(.gray.opacity(0.3))
+                    Text("輸入地點名稱搜尋，或點擊 ⭐ 從收藏庫選取")
+                        .font(.system(size: 13))
+                        .foregroundColor(.gray)
+                        .multilineTextAlignment(.center)
+                    Spacer()
+                }
+                .padding(.horizontal, 40)
+            }
         }
+        .onAppear {
+            // Auto-focus search bar
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                isSearchFocused = true
+            }
+        }
+    }
+    
+    // MARK: - Search Results
+    private var searchResultsView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(searchService.suggestions) { result in
+                    Button(action: { selectSearchResult(result) }) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(result.title)
+                                    .font(.system(size: 15, weight: .bold))
+                                    .foregroundColor(.black)
+                                Text(result.subtitle)
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.gray)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Image(systemName: "arrow.right.circle")
+                                .foregroundColor(PuboColors.navy)
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .contentShape(Rectangle())
+                    }
+                    Divider().padding(.horizontal, 20)
+                }
+            }
+        }
+    }
+    
+    // MARK: - Collection List
+    private var collectionListView: some View {
+        let allPlaces = sdContents.flatMap { $0.places }
+        
+        return Group {
+            if allPlaces.isEmpty {
+                VStack(spacing: 12) {
+                    Spacer()
+                    Image(systemName: "star.slash")
+                        .font(.system(size: 36))
+                        .foregroundColor(.gray.opacity(0.3))
+                    Text("收藏庫沒有地點")
+                        .font(.system(size: 14))
+                        .foregroundColor(.gray)
+                    Spacer()
+                }
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(allPlaces, id: \.id) { place in
+                            Button(action: { selectCollectionPlace(place) }) {
+                                HStack(spacing: 12) {
+                                    let imgUrl = place.contents.first?.previewThumbnailUrl
+                                    
+                                    if let urlStr = imgUrl, let url = URL(string: urlStr) {
+                                        AsyncImage(url: url) { img in
+                                            img.resizable().aspectRatio(contentMode: .fill)
+                                        } placeholder: {
+                                            Color.gray.opacity(0.1)
+                                        }
+                                        .frame(width: 40, height: 40)
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    } else {
+                                        Image(systemName: "mappin.circle.fill")
+                                            .resizable()
+                                            .frame(width: 32, height: 32)
+                                            .foregroundColor(PuboColors.navy)
+                                    }
+                                    
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(place.name)
+                                            .font(.system(size: 14, weight: .bold))
+                                            .foregroundColor(.black)
+                                        if let addr = place.address, !addr.isEmpty {
+                                            Text(addr)
+                                                .font(.system(size: 11))
+                                                .foregroundColor(.gray)
+                                                .lineLimit(1)
+                                        }
+                                    }
+                                    
+                                    Spacer()
+                                    
+                                    Image(systemName: "arrow.right.circle")
+                                        .foregroundColor(PuboColors.navy)
+                                }
+                                .padding(.horizontal, 20)
+                                .padding(.vertical, 10)
+                                .contentShape(Rectangle())
+                            }
+                            Divider().padding(.horizontal, 20)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Actions
+    private func selectSearchResult(_ result: SearchResult) {
+        Task {
+            do {
+                let details = try await searchService.getDetails(for: result)
+                await MainActor.run {
+                    var spot = ItinerarySpot.empty()
+                    spot.name = result.title
+                    spot.latitude = details.lat
+                    spot.longitude = details.lng
+                    spot.googlePlaceId = result.source == .google ? result.placeId : nil
+                    
+                    spot.place = PlaceInfo(
+                        name: result.title,
+                        placeId: result.placeId,
+                        address: details.address,
+                        latitude: details.lat,
+                        longitude: details.lng,
+                        category: nil,
+                        rating: nil,
+                        userRatingsTotal: nil,
+                        openingHours: nil
+                    )
+                    
+                    onReplace(spot)
+                    dismiss()
+                }
+            } catch {
+                // Fallback: just use name
+                await MainActor.run {
+                    var spot = ItinerarySpot.empty()
+                    spot.name = result.title
+                    onReplace(spot)
+                    dismiss()
+                }
+            }
+        }
+    }
+    
+    private func selectCollectionPlace(_ place: SDPlace) {
+        var spot = ItinerarySpot.empty()
+        spot.name = place.name
+        spot.latitude = place.latitude
+        spot.longitude = place.longitude
+        spot.googlePlaceId = place.id
+        
+        // Map category
+        if let cat = place.category?.lowercased() {
+            if cat.contains("food") || cat.contains("restaurant") { spot.category = .food }
+            else if cat.contains("lodging") || cat.contains("hotel") { spot.category = .accommodation }
+            else if cat.contains("shopping") || cat.contains("store") { spot.category = .shopping }
+            else { spot.category = .spot }
+        }
+        
+        // Build PlaceInfo
+        var openHours: OpenHours? = nil
+        if let jsonStr = place.openingHours,
+           let data = jsonStr.data(using: .utf8) {
+            openHours = try? JSONDecoder().decode(OpenHours.self, from: data)
+        }
+        
+        spot.place = PlaceInfo(
+            name: place.name,
+            placeId: place.id,
+            address: place.address,
+            latitude: place.latitude,
+            longitude: place.longitude,
+            category: place.category,
+            rating: place.rating,
+            userRatingsTotal: place.userRatingCount,
+            openingHours: openHours
+        )
+        
+        onReplace(spot)
+        dismiss()
     }
 }
 
@@ -1615,3 +1881,70 @@ struct DayCell: View {
 // So I will alias it or rename this struct to `CalendarView`.
 
 typealias CalendarView = CustomRangeCalendarView
+
+// MARK: - Accommodation Start Point UI Components
+
+struct PinnedAccommodationHeader: View {
+    let spot: ItinerarySpot
+    
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "bed.double.fill")
+                .foregroundColor(PuboColors.navy)
+                .font(.system(size: 18))
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text("當日住宿")
+                    .font(.system(size: 10, weight: .black))
+                    .foregroundColor(.gray)
+                    .tracking(1)
+                Text(spot.name)
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(PuboColors.navy)
+            }
+            
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+}
+
+struct AccommodationToSpotGap: View {
+    let from: ItinerarySpot
+    let to: ItinerarySpot
+    @EnvironmentObject var tripManager: TripManager
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            Spacer().frame(width: 22 + 24) // Align with the center of the bed circle - account for overall horizontal padding 24
+            
+            VStack {
+                Line()
+                    .stroke(style: StrokeStyle(lineWidth: 2, dash: [4]))
+                    .foregroundColor(Color.gray.opacity(0.3))
+                    .frame(width: 2, height: 40)
+            }
+            
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: "clock")
+                        .font(.system(size: 10))
+                    Text(from.travelTime ?? "計算中...")
+                        .font(.system(size: 11, weight: .bold))
+                    
+                    if let dist = from.travelDistance {
+                        Text("•")
+                        Text(dist)
+                            .font(.system(size: 11))
+                    }
+                }
+                .foregroundColor(.gray)
+                .padding(.leading, 12)
+                .offset(y: 10)
+            }
+            
+            Spacer()
+        }
+    }
+}

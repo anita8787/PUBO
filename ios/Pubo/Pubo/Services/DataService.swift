@@ -181,6 +181,37 @@ class DataService: ObservableObject {
         }
     }
     
+    /// 提交連結以進行解析 (Smart Import)
+    func submitShareTask(url: String) async throws -> String {
+        let urlString = "https://pubo-pink.vercel.app/api/v1/share"
+        guard let apiURL = URL(string: urlString) else {
+            throw URLError(.badURL)
+        }
+        
+        var request = URLRequest(url: apiURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let payload = ["url": url]
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
+        
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        
+        struct ShareResponse: Decodable {
+            let taskId: String
+        }
+        
+        let shareResponse = try decoder.decode(ShareResponse.self, from: data)
+        return shareResponse.taskId
+    }
+    
     /// 輪詢任務直到完成或失敗 (適合處理 YouTube/Threads 等長任務)
     /// Default: 90 retries * 2s = 180s (3 minutes)
     func pollTaskResult(taskId: String, maxRetries: Int = 90) async -> (Content, [ContentPlaceInfo])? {

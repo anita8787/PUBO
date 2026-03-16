@@ -81,6 +81,63 @@ class TripManager: ObservableObject {
         }
     }
     
+    func addAccommodation(to tripId: String, spot: ItinerarySpot, checkIn: Date, checkOut: Date) {
+        guard let dayList = days[tripId] else { return }
+        
+        let calendar = Calendar.current
+        var currentDate = calendar.startOfDay(for: checkIn)
+        let endDate = calendar.startOfDay(for: checkOut)
+        
+        Task {
+            // Loop through each day from check-in to check-out (inclusive)
+            while currentDate <= endDate {
+                // Find dayIndex for this date
+                if let dayIndex = dayList.firstIndex(where: { 
+                    if let d = $0.date {
+                        return calendar.isDate(d, inSameDayAs: currentDate)
+                    }
+                    return false
+                }) {
+                    // Prepare a copy of the spot with unique ID for each day
+                    var daySpot = spot
+                    daySpot.id = UUID().uuidString
+                    daySpot.category = .accommodation
+                    
+                    // Add to this day
+                    await addSpotWithDayId(to: tripId, dayIndex: dayIndex, spot: daySpot)
+                }
+                
+                // Advance to next day
+                guard let nextDate = calendar.date(byAdding: .day, value: 1, to: currentDate) else { break }
+                currentDate = nextDate
+            }
+        }
+    }
+    
+    // Helper to add spot and wait for result (internal)
+    private func addSpotWithDayId(to tripId: String, dayIndex: Int, spot: ItinerarySpot) async {
+        guard let dayList = days[tripId], dayIndex < dayList.count else { return }
+        let dayId = dayList[dayIndex].id
+        
+        do {
+            let newSpot = try await DataService.shared.addSpot(dayId: dayId, spot: spot)
+            
+            // Update Local State
+            await MainActor.run {
+                if var currentDays = self.days[tripId] {
+                    currentDays[dayIndex].spots.append(newSpot)
+                    self.days[tripId] = currentDays
+                    
+                    if let idx = trips.firstIndex(where: { $0.id == tripId }) {
+                        trips[idx].days = currentDays
+                    }
+                }
+            }
+        } catch {
+            print("Add Accommodation Day Error: \(error)")
+        }
+    }
+    
     func addSpot(to tripId: String, dayIndex: Int, spot: ItinerarySpot) {
         guard let dayList = days[tripId], dayIndex < dayList.count else { return }
         let dayId = dayList[dayIndex].id
@@ -92,12 +149,21 @@ class TripManager: ObservableObject {
                 
                 // Update Local State
                 if var currentDays = self.days[tripId] {
-                    currentDays[dayIndex].spots.append(newSpot)
-                    // Sort by start time if needed, or rely on order
-                    // currentDays[dayIndex].spots.sort { $0.time < $1.time } 
+                    if spot.category == .accommodation {
+                        // Accommodation always goes to the top
+                        currentDays[dayIndex].spots.insert(newSpot, at: 0)
+                    } else {
+                        currentDays[dayIndex].spots.append(newSpot)
+                    }
                     self.days[tripId] = currentDays
                     
-                    // Update Trip List (optional, to reflect spot count)
+                    // Trigger travel calculation if there's a next spot
+                    let spots = currentDays[dayIndex].spots
+                    if let newSpotIdx = spots.firstIndex(where: { $0.id == newSpot.id }),
+                       newSpotIdx < spots.count - 1 {
+                        self.updateSpotTransport(tripId: tripId, dayIndex: dayIndex, spotId: newSpot.id, transportType: newSpot.travelMode ?? .train)
+                    }
+                    
                     if let idx = trips.firstIndex(where: { $0.id == tripId }) {
                         trips[idx].days = currentDays
                     }
@@ -106,6 +172,8 @@ class TripManager: ObservableObject {
                 print("Add Spot Error: \(error)")
                 self.errorMessage = "Failed to add spot"
             }
+            // Auto-repair if coordinates are 0,0
+            self.resolveInvalidCoordinates(in: tripId)
         }
     }
     
@@ -134,6 +202,8 @@ class TripManager: ObservableObject {
                             print("✅ Final state synced and published")
                         }
                     }
+                    // Auto-repair check after update
+                    self.resolveInvalidCoordinates(in: tripId)
                 }
             } catch {
                 print("Update Spot Error: \(error)")
@@ -375,6 +445,29 @@ class TripManager: ObservableObject {
         updateSpot(tripId: tripId, dayIndex: dayIndex, spot: spot)
     }
     
+    /// Replace a spot's location data with a new spot, keeping position-related info (id, sortOrder, stayDuration, travelMode).
+    func replaceSpot(tripId: String, dayIndex: Int, oldSpotId: String, newSpot: ItinerarySpot) {
+        guard let dayList = days[tripId], dayIndex < dayList.count else { return }
+        guard let spotIndex = dayList[dayIndex].spots.firstIndex(where: { $0.id == oldSpotId }) else { return }
+        
+        var replaced = dayList[dayIndex].spots[spotIndex]
+        
+        // Keep: id, dayId, sortOrder, stayDuration, travelMode, travelTime, travelDistance
+        // Replace: name, latitude, longitude, googlePlaceId, category, place, imageUrl
+        replaced.name = newSpot.name
+        replaced.latitude = newSpot.latitude
+        replaced.longitude = newSpot.longitude
+        replaced.googlePlaceId = newSpot.googlePlaceId
+        replaced.category = newSpot.category
+        replaced.place = newSpot.place
+        replaced.imageUrl = newSpot.imageUrl
+        
+        updateSpot(tripId: tripId, dayIndex: dayIndex, spot: replaced)
+        
+        // Recalculate travel for this spot and the next
+        updateSpotTransport(tripId: tripId, dayIndex: dayIndex, spotId: replaced.id, transportType: replaced.travelMode ?? .train)
+    }
+    
     func deleteTrip(id: String) {
         Task {
             do {
@@ -532,6 +625,51 @@ class TripManager: ObservableObject {
                 originalSpotsOrder[tripId]?.removeValue(forKey: dayId)
             } catch {
                 print("Restore API Error: \(error)")
+            }
+        }
+    }
+    
+    // MARK: - Coordinate Fixes (MapKit Fallback)
+    
+    /// Scan all spots in a trip and fix (0, 0) coordinates using MapKit Local Search.
+    func resolveInvalidCoordinates(in tripId: String) {
+        print("🔍 Scanning trip \(tripId) for invalid coordinates...")
+        guard let dayList = days[tripId] else {
+            print("❌ resolveInvalidCoordinates abort: No days found for trip \(tripId)")
+            return 
+        }
+        
+        let resolver = POIResolverService()
+        
+        Task {
+            for (dayIndex, day) in dayList.enumerated() {
+                for spot in day.spots {
+                    // Check for invalid coordinates (0,0 is Null Island)
+                    let isZero = spot.latitude == 0.0 && spot.longitude == 0.0
+                    let isNil = spot.latitude == nil
+                    
+                    if isZero || isNil {
+                        print("🛠 Repairing coordinates for: \(spot.name) (isZero: \(isZero), isNil: \(isNil))")
+                        
+                        do {
+                            // Use MapKit to find the place
+                            let results = try await resolver.resolvePOI(query: spot.name)
+                            if let firstMatch = results.first {
+                                var updatedSpot = spot
+                                updatedSpot.latitude = firstMatch.latitude
+                                updatedSpot.longitude = firstMatch.longitude
+                                
+                                // Update local and backend
+                                self.updateSpot(tripId: tripId, dayIndex: dayIndex, spot: updatedSpot)
+                                print("✅ Repaired \(spot.name) -> \(firstMatch.latitude), \(firstMatch.longitude)")
+                            } else {
+                                print("⚠️ Could not find MapKit results for: \(spot.name)")
+                            }
+                        } catch {
+                            print("❌ Error repairing coordinates for \(spot.name): \(error)")
+                        }
+                    }
+                }
             }
         }
     }
