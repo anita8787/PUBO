@@ -45,6 +45,20 @@ class ApifyService:
             for item in dataset_items:
                 # 遍歷可能的內容欄位
                 text = item.get("caption") or item.get("text") or ""
+                
+                # Try to extract comments if they were scraped (latestComments or comments array)
+                comments_text = ""
+                comments = item.get("latestComments", []) or item.get("comments", [])
+                if isinstance(comments, list):
+                    for idx, c in enumerate(comments):
+                        c_text = c.get("text", "")
+                        if c_text:
+                            comments_text += f"\n[留言 {idx+1}]: {c_text}"
+                
+                # Append comments to main text for the LLM to analyze
+                if comments_text:
+                    text += "\n\n--- 網友留言 ---\n" + comments_text
+
                 author_name = item.get("ownerUsername") or item.get("owner", {}).get("username") or ""
                 author_avatar = item.get("ownerProfilePicUrl") or item.get("owner", {}).get("profilePicUrl") or ""
                 thumbnail = item.get("displayUrl") or item.get("images", [None])[0] or ""
@@ -82,11 +96,22 @@ class ApifyService:
                 "pageFunction": """async function pageFunction(context) {
                     const { page, request, log } = context;
                     const title = await page.title();
-                    // 嘗試抓取主要內容 (根據 Threads 的 HTML 結構)
-                    // 這裡先簡單抓取整個 body text，讓 LLM 去處理雜訊
-                    // 但為了圖片，我們需要嘗試抓 meta tags
                     
-                    const text = await page.evaluate(() => document.body.innerText);
+                    const text = await page.evaluate(() => {
+                        // 精確抓取 Threads 的發文與留言文字，剃除登入/註冊等系統雜訊
+                        const elements = document.querySelectorAll('span[dir="auto"]');
+                        let extractedText = "";
+                        const junkWords = ["Log in", "Sign up", "Log in to Threads", "Reply", "Like", "Share", "Repost", "Follow", "Activity", "Search", "Get the app", "Thread", "Threads"];
+                        
+                        elements.forEach(el => {
+                            const val = el.innerText.trim();
+                            // 只保留有實質內容的片段，並且不是完全跟隨 junkWords 匹配的字串
+                            if (val.length > 0 && !junkWords.includes(val)) {
+                                extractedText += val + "\\n";
+                            }
+                        });
+                        return extractedText;
+                    });
                     
                     const ogTitle = await page.evaluate(() => {
                         const el = document.querySelector('meta[property="og:title"]');
@@ -97,18 +122,12 @@ class ApifyService:
                         const el = document.querySelector('meta[property="og:image"]');
                         return el ? el.content : "";
                     });
-                    
-                    const ogDescription = await page.evaluate(() => {
-                        const el = document.querySelector('meta[property="og:description"]');
-                        return el ? el.content : "";
-                    });
 
                     return { 
                         title, 
                         text,
                         ogTitle,
-                        ogImage,
-                        ogDescription
+                        ogImage
                     };
                 }"""
             }

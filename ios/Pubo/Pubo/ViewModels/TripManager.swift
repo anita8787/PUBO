@@ -241,12 +241,14 @@ class TripManager: ObservableObject {
     }
     
     func deleteSpot(tripId: String, dayIndex: Int, spotId: String) {
+        print("🗑 [TripManager] deleteSpot: Trip(\(tripId)) DayIndex(\(dayIndex)) SpotId(\(spotId))")
         Task {
             do {
                 try await DataService.shared.deleteSpot(spotId: spotId)
                 
                 // Update Local
                 if var currentDays = self.days[tripId], dayIndex < currentDays.count {
+                    print("✅ [TripManager] Successfully deleted from backend, updating local state")
                     currentDays[dayIndex].spots.removeAll { $0.id == spotId }
                     self.days[tripId] = currentDays
                     
@@ -654,14 +656,10 @@ class TripManager: ObservableObject {
         let resolver = POIResolverService()
         
         Task {
-            for (dayIndex, day) in dayList.enumerated() {
+            for (dayIdx, day) in dayList.enumerated() {
                 for spot in day.spots {
-                    // Check for invalid coordinates (0,0 is Null Island)
-                    let isZero = spot.latitude == 0.0 && spot.longitude == 0.0
-                    let isNil = spot.latitude == nil
-                    
-                    if isZero || isNil {
-                        print("🛠 Repairing coordinates for: \(spot.name) (isZero: \(isZero), isNil: \(isNil))")
+                    if spot.latitude == 0.0 || spot.latitude == nil {
+                        print("🛠 Repairing coordinates for: \(spot.name) (isZero: true, isNil: \(spot.latitude == nil))")
                         
                         do {
                             // Clean the query: Remove parentheses and content within (e.g., "(弘大店)")
@@ -672,20 +670,86 @@ class TripManager: ObservableObject {
                                 cleanQuery = String(cleanQuery[..<range.lowerBound])
                             }
                             
-                            print("🛠 MapKit Searching: '\(cleanQuery)' (Original: '\(spot.name)')")
+                            // Use MapKit to find the place with destination bias
+                            let destination = trips.first(where: { $0.id == tripId })?.destination ?? ""
+                            print("🌍 [TripManager] Resolving coords for \(spot.name). Trip destination: '\(destination)' (TripCount: \(trips.count))")
                             
-                            // Use MapKit to find the place
-                            let results = try await resolver.resolvePOI(query: cleanQuery)
-                            if let firstMatch = results.first {
+                            let targetRegion = region(for: destination)
+                            let results = try await resolver.resolvePOI(query: cleanQuery, region: targetRegion, countryName: destination)
+                            
+                            // 🔍 Aggressive Filter: Pick results within a reasonable distance from destination center
+                            let validResults = results.filter { match in
+                                guard let target = targetRegion else { return true }
+                                let dist = CLLocation(latitude: match.latitude, longitude: match.longitude)
+                                    .distance(from: CLLocation(latitude: target.center.latitude, longitude: target.center.longitude))
+                                return dist < 500_000 // Increased to 500km to cover full North-South span
+                            }
+                            
+                            // Perform Reverse Geocoding to verify country
+                            let resultsWithCountry = await withTaskGroup(of: (Place, String?).self) { group in
+                                for item in validResults {
+                                    group.addTask {
+                                        let location = CLLocation(latitude: item.latitude, longitude: item.longitude)
+                                        do {
+                                            let placemarks = try await CLGeocoder().reverseGeocodeLocation(location)
+                                            return (item, placemarks.first?.isoCountryCode)
+                                        } catch {
+                                            return (item, nil)
+                                        }
+                                    }
+                                }
+                                var final: [(Place, String?)] = []
+                                for await res in group { final.append(res) }
+                                return final
+                            }
+
+                            // Filter by distance AND country code
+                            let isKoreaTrip = destination.lowercased().contains("韓國") || destination.lowercased().contains("korea")
+                            let strictlyValid = resultsWithCountry.filter { item, countryCode in
+                                guard let target = targetRegion else { return true }
+                                let dist = CLLocation(latitude: item.latitude, longitude: item.longitude)
+                                    .distance(from: CLLocation(latitude: target.center.latitude, longitude: target.center.longitude))
+                                
+                                // Hard rule: If trip is Korea, result MUST be KR
+                                if isKoreaTrip && countryCode != "KR" {
+                                    print("🚫 Rejected Match for \(spot.name): Wrong Country (\(countryCode ?? "Unknown") != KR)")
+                                    return false
+                                }
+                                
+                                return dist < 280_000 
+                            }
+
+                            if let (firstMatch, _) = strictlyValid.first {
+                                guard let target = targetRegion else {
+                                    print("⚠️ Cannot verify region for \(spot.name): targetRegion is nil.")
+                                    // Proceed without region check if targetRegion is nil, or skip if strict
+                                    // For now, we'll proceed as the filter already handled it.
+                                    var updatedSpot = spot
+                                    updatedSpot.latitude = firstMatch.latitude
+                                    updatedSpot.longitude = firstMatch.longitude
+                                    self.updateSpot(tripId: tripId, dayIndex: dayIdx, spot: updatedSpot)
+                                    print("✅ Repaired \(spot.name) -> \(firstMatch.latitude), \(firstMatch.longitude)")
+                                    return
+                                }
+                                
+                                let dist = CLLocation(latitude: firstMatch.latitude, longitude: firstMatch.longitude)
+                                    .distance(from: CLLocation(latitude: target.center.latitude, longitude: target.center.longitude))
+                                    
+                                print("✅ Correct-Region & Country Match found: \(Int(dist/1000))km from center (KR verified)")
+                                
                                 var updatedSpot = spot
                                 updatedSpot.latitude = firstMatch.latitude
                                 updatedSpot.longitude = firstMatch.longitude
                                 
                                 // Update local and backend
-                                self.updateSpot(tripId: tripId, dayIndex: dayIndex, spot: updatedSpot)
+                                self.updateSpot(tripId: tripId, dayIndex: dayIdx, spot: updatedSpot)
                                 print("✅ Repaired \(spot.name) -> \(firstMatch.latitude), \(firstMatch.longitude)")
                             } else {
-                                print("⚠️ Could not find MapKit results for: \(cleanQuery)")
+                                if !results.isEmpty {
+                                    print("⚠️ Rejected \(results.count) results because they were outside the \(destination) region or too far from its center.")
+                                } else {
+                                    print("⚠️ Could not find any MapKit results for: \(cleanQuery)")
+                                }
                             }
                         } catch {
                             print("❌ Error repairing coordinates for \(spot.name): \(error)")
@@ -694,5 +758,26 @@ class TripManager: ObservableObject {
                 }
             }
         }
+    }
+    
+    private func region(for destination: String) -> MKCoordinateRegion? {
+        let dest = destination.lowercased()
+        if dest.contains("korea") || dest.contains("韓國") || dest.contains("首爾") || dest.contains("seoul") || dest.contains("釜山") || dest.contains("busan") {
+            return MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 36.5, longitude: 127.5), // Center of South Korea
+                span: MKCoordinateSpan(latitudeDelta: 6.0, longitudeDelta: 6.0)
+            )
+        } else if dest.contains("japan") || dest.contains("日本") || dest.contains("東京") || dest.contains("tokyo") || dest.contains("大阪") || dest.contains("osaka") || dest.contains("京都") || dest.contains("kyoto") {
+            return MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 35.6762, longitude: 139.6503),
+                span: MKCoordinateSpan(latitudeDelta: 10.0, longitudeDelta: 10.0)
+            )
+        } else if dest.contains("taiwan") || dest.contains("台灣") || dest.contains("台北") || dest.contains("taipei") || dest.contains("高雄") || dest.contains("kaohsiung") {
+            return MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 23.6978, longitude: 120.9605),
+                span: MKCoordinateSpan(latitudeDelta: 3.0, longitudeDelta: 3.0)
+            )
+        }
+        return nil
     }
 }

@@ -2,6 +2,7 @@ import SwiftUI
 import MapKit
 
 struct TripMapPlanningView: View {
+    @EnvironmentObject var tripManager: TripManager
     let trip: Trip
     @Binding var position: MapCameraPosition
     var spots: [ItinerarySpot]
@@ -27,14 +28,49 @@ struct TripMapPlanningView: View {
     
     var body: some View {
         ZStack(alignment: .bottom) {
-            // === 地圖圖層（全螢幕背景）===
+            // === 地圖圖層（背景）===
             mapLayer
             
-            // === 浮動頂部控制按鈕 ===
-            floatingHeaderLayer
+            // === 浮動控制項（分開佈置，避免全螢幕遮擋）===
+            // 使用獨立的 Top 容器，不蓋住中央地圖區域
+            VStack {
+                HStack(alignment: .top) {
+                    backButton
+                    Spacer()
+                    headerActionButtons
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, 16)
+                Spacer()
+            }
             
             // === 底部面板 ===
             bottomSheetPanel
+                .zIndex(10)
+        }
+    }
+    
+    private var backButton: some View {
+        Button(action: onBack) {
+            Image(systemName: "chevron.left")
+                .font(.system(size: 20, weight: .bold))
+                .foregroundColor(.black)
+                .frame(width: 40, height: 40)
+                .background(Color.white)
+                .clipShape(Circle())
+                .overlay(Circle().stroke(Color.black, lineWidth: 2))
+                .background(
+                    Circle()
+                        .fill(Color.black.opacity(0.15))
+                        .offset(x: 2.5, y: 2.5)
+                )
+        }
+    }
+    
+    private var headerActionButtons: some View {
+        HStack(spacing: 12) {
+            headerCircleButton(icon: "square.and.arrow.up", action: onShareClick)
+            headerCircleButton(icon: "gearshape", action: {})
         }
     }
     
@@ -102,12 +138,12 @@ struct TripMapPlanningView: View {
                 // Skip invalid 0,0
                 if startCoord.lat == 0 || endCoord.lat == 0 { continue }
                 
-                let startLocation = CLLocationCoordinate2D(latitude: startCoord.lat, longitude: startCoord.long)
-                let endLocation = CLLocationCoordinate2D(latitude: endCoord.lat, longitude: endCoord.long)
+                let startLocation = CLLocation(latitude: startCoord.lat, longitude: startCoord.long)
+                let endLocation = CLLocation(latitude: endCoord.lat, longitude: endCoord.long)
                 
                 let request = MKDirections.Request()
-                request.source = MKMapItem(placemark: MKPlacemark(coordinate: startLocation))
-                request.destination = MKMapItem(placemark: MKPlacemark(coordinate: endLocation))
+                request.source = MKMapItem(location: startLocation, address: nil)
+                request.destination = MKMapItem(location: endLocation, address: nil)
                 
                 // Determine transport type based on spot preference or default to automobile
                 switch spots[i].travelMode {
@@ -190,39 +226,60 @@ struct TripMapPlanningView: View {
         }
     }
     
+    private func focusOnSpot(_ spot: ItinerarySpot) {
+        guard let coord = spot.coordinate else { return }
+        let center = CLLocationCoordinate2D(latitude: coord.lat, longitude: coord.long)
+        withAnimation(.easeInOut(duration: 0.8)) {
+            position = .region(MKCoordinateRegion(
+                center: center,
+                span: MKCoordinateSpan(latitudeDelta: 0.005, longitudeDelta: 0.005)
+            ))
+        }
+    }
+    
     // MARK: - 定位使用者
     
     // MARK: - 地圖標記
     @ViewBuilder
     private func mapMarker(for spot: ItinerarySpot, index: Int) -> some View {
-        ZStack(alignment: .topTrailing) {
-            // Main Marker Circle
-            ZStack {
-                Circle()
-                    .fill(Color.white)
-                    .frame(width: 32, height: 32)
-                    .retroShadow(color: .black.opacity(0.1), offset: 2)
-                    .overlay(Circle().stroke(PuboColors.navy, lineWidth: 1.5))
+        VStack(spacing: 0) {
+            ZStack(alignment: .topTrailing) {
+                // Main Marker Circle
+                ZStack {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 32, height: 32)
+                        .retroShadow(color: .black.opacity(0.1), offset: 2)
+                        .overlay(Circle().stroke(PuboColors.navy, lineWidth: 1.5))
+                    
+                    // Category Icon
+                    categoryIcon(for: spot.category)
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(PuboColors.navy)
+                }
                 
-                // Category Icon
-                categoryIcon(for: spot.category)
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundColor(PuboColors.navy)
+                // Index Badge (Small Red Circle)
+                ZStack {
+                    Circle()
+                        .fill(PuboColors.red)
+                        .frame(width: 14, height: 14)
+                        .overlay(Circle().stroke(Color.white, lineWidth: 1))
+                    
+                    Text("\(index + 1)")
+                        .font(.system(size: 8, weight: .black))
+                        .foregroundColor(.white)
+                }
+                .offset(x: 4, y: -4)
             }
             
-            // Index Badge (Small Red Circle)
-            ZStack {
-                Circle()
-                    .fill(PuboColors.red)
-                    .frame(width: 14, height: 14)
-                    .overlay(Circle().stroke(Color.white, lineWidth: 1))
-                
-                Text("\(index + 1)")
-                    .font(.system(size: 8, weight: .black))
-                    .foregroundColor(.white)
-            }
-            .offset(x: 4, y: -4)
+            // 下方加入倒三角形當作大頭針的尖角
+            Triangle()
+                .fill(PuboColors.navy)
+                .frame(width: 10, height: 8)
+                .rotationEffect(.degrees(180))
+                .offset(y: -1) // 微微向上偏移貼合圓圈
         }
+        .offset(y: -16) // 讓尖角正對著座標點 (32+8=40/2=20，微調讓底部針尖對齊座標)
     }
     
     private func categoryIcon(for category: SpotCategory?) -> Image {
@@ -236,40 +293,6 @@ struct TripMapPlanningView: View {
         }
     }
     
-    // MARK: - 浮動頂部控制按鈕
-    private var floatingHeaderLayer: some View {
-        VStack {
-            HStack {
-                // 返回按鈕
-                Button(action: onBack) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundColor(.black)
-                        .frame(width: 40, height: 40)
-                        .background(Color.white)
-                        .clipShape(Circle())
-                        .overlay(Circle().stroke(Color.black, lineWidth: 2))
-                        .background(
-                            Circle()
-                                .fill(Color.black.opacity(0.15))
-                                .offset(x: 2.5, y: 2.5)
-                        )
-                }
-
-                Spacer()
-
-                // 分享 + 設定按鈕
-                HStack(spacing: 12) {
-                    headerCircleButton(icon: "square.and.arrow.up", action: onShareClick)
-                    headerCircleButton(icon: "gearshape", action: {})
-                }
-            }
-            .padding(.horizontal, 24)
-            .padding(.top, 16)
-
-            Spacer()
-        }
-    }
     
     private func headerCircleButton(icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -422,7 +445,7 @@ struct TripMapPlanningView: View {
             }
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
-        .frame(height: 240) // 調整高度以對應新的面板高度
+        .frame(height: 240)
     }
     
     private func conciseSpotCard(spot: ItinerarySpot, index: Int) -> some View {
@@ -468,7 +491,7 @@ struct TripMapPlanningView: View {
             .padding(.horizontal, 32)
             .padding(.top, 16)
             
-            Spacer().frame(height: 12) // Smaller fixed spacer instead of flexible one
+            Spacer().frame(height: 12) 
             
             // 底部交通資訊列
             HStack(alignment: .center, spacing: 0) {
@@ -493,11 +516,11 @@ struct TripMapPlanningView: View {
                 ZStack {
                     Circle()
                         .fill(PuboColors.navy)
-                        .frame(width: 28, height: 28) // Reduced from 36
+                        .frame(width: 28, height: 28)
                         .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
                     
                     Text("\(index + 1)")
-                        .font(.system(size: 12, weight: .black)) // Slightly smaller font
+                        .font(.system(size: 12, weight: .black))
                         .foregroundColor(.white)
                 }
                 .overlay(Circle().stroke(PuboColors.navy, lineWidth: 1.5))
@@ -523,7 +546,12 @@ struct TripMapPlanningView: View {
             .padding(.horizontal, 24)
             .padding(.bottom, 24)
         }
+        .contentShape(Rectangle()) // 確保點擊區域覆蓋整個卡片
+        .onTapGesture(count: 2) {
+            focusOnSpot(spot)
+        }
     }
+    
     
     // MARK: - 總覽模式內容
     private var overviewContent: some View {
@@ -725,7 +753,20 @@ struct TripMapPlanningView: View {
                 }
             }
             
+            
             Spacer()
+            
+            // 刪除按鈕 (地圖內快速操作)
+            Button(action: {
+                tripManager.deleteSpot(tripId: trip.id, dayIndex: selectedDayIndex, spotId: spot.id)
+            }) {
+                Image(systemName: "trash")
+                    .font(.system(size: 14))
+                    .foregroundColor(.red.opacity(0.6))
+                    .padding(8)
+                    .background(Color.red.opacity(0.1))
+                    .clipShape(Circle())
+            }
             
             // 勾勾按鈕（點擊切換備忘錄）
             Button(action: {
@@ -751,6 +792,10 @@ struct TripMapPlanningView: View {
             }
         }
         .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) {
+            focusOnSpot(spot)
+        }
     }
     
     // MARK: - 備忘錄區塊（與規劃模式相同樣式）

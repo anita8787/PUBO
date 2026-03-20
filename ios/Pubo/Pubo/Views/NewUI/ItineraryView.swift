@@ -299,12 +299,14 @@ struct TripDetailView: View {
                 
                 VStack {
                     Spacer()
-                    AddSpotSheet(onAddSpot: { newSpot, startDate, endDate in
+                    AddSpotSheet(trip: trip, onAddSpot: { newSpot, startDate, endDate in
                         // Perform Add
+                        print("➕ [ItineraryView] onAddSpot callback triggered. Adding to DayIndex: \(selectedDayIndex)")
                         withAnimation {
                             if let start = startDate, let end = endDate {
                                 tripManager.addAccommodation(to: trip.id, spot: newSpot, checkIn: start, checkOut: end)
                             } else {
+                                // Explicitly targeting the currently active day index
                                 tripManager.addSpot(to: trip.id, dayIndex: selectedDayIndex, spot: newSpot)
                             }
                             isAddingSpotSheet = false
@@ -759,9 +761,12 @@ struct TripDetailView: View {
     }
     // MARK: - Navigation Logic
     func handleNavigation() {
-        // 1. Get current spots
-        let spots = getAllSpots()
-        guard spots.count >= 2 else { return }
+        // 1. Get ONLY current day's spots for sharing
+        let spots = currentDaySpots.filter { $0.category != .accommodation }
+        guard spots.count >= 2 else {
+            print("⚠️ handleNavigation: Not enough spots for current day.")
+            return 
+        }
         
         // 2. Determine Mode
         let mode = getDominantTransportMode(for: spots)

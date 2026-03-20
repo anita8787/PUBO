@@ -1,8 +1,10 @@
 import SwiftUI
 import SwiftData
+import MapKit // Added for MKCoordinateRegion
 
 struct AddSpotSheet: View {
     @Environment(\.dismiss) var dismiss
+    let trip: Trip // 傳入當前行程以取得目的地資訊
     
     // Callback to Parent (Spot, Optional Start Date, Optional End Date for Multi-day)
     var onAddSpot: (ItinerarySpot, Date?, Date?) -> Void
@@ -166,7 +168,7 @@ struct AddSpotSheet: View {
         .sheet(item: $activeSheet) { mode in
             switch mode {
             case .smartImport:
-                SmartImportView(onAddSpot: { spot, start, end in
+                SmartImportView(trip: trip, onAddSpot: { spot, start, end in
                     onAddSpot(spot, start, end)
                 }, onDismiss: { activeSheet = nil })
             case .accommodation:
@@ -188,27 +190,23 @@ struct AddSpotSheet: View {
     }
     
     private func selectResult(_ result: SearchResult) {
-        Task {
+        Task { @MainActor in
             do {
                 let details = try await searchService.getDetails(for: result)
-                await MainActor.run {
-                    var spot = ItinerarySpot.empty()
-                    spot.name = result.title
-                    spot.latitude = details.lat
-                    spot.longitude = details.lng
-                    spot.googlePlaceId = result.source == .google ? result.placeId : nil
-                    onAddSpot(spot, nil, nil)
-                    dismiss()
-                }
+                var spot = ItinerarySpot.empty()
+                spot.name = result.title
+                spot.latitude = details.lat
+                spot.longitude = details.lng
+                spot.googlePlaceId = result.source == .google ? result.placeId : nil
+                onAddSpot(spot, nil, nil)
+                dismiss()
             } catch {
                 print("❌ Failed to fetch details: \(error)")
                 // Fallback to simple add
-                await MainActor.run {
-                    var spot = ItinerarySpot.empty()
-                    spot.name = result.title
-                    onAddSpot(spot, nil, nil)
-                    dismiss()
-                }
+                var spot = ItinerarySpot.empty()
+                spot.name = result.title
+                onAddSpot(spot, nil, nil)
+                dismiss()
             }
         }
     }
@@ -278,6 +276,7 @@ struct FunctionButton: View {
 
 // 1. Smart Import View
 struct SmartImportView: View {
+    let trip: Trip
     var onAddSpot: (ItinerarySpot, Date?, Date?) -> Void
     var onDismiss: () -> Void
     
@@ -285,86 +284,181 @@ struct SmartImportView: View {
     @State private var isProcessing = false
     @State private var errorMessage: String? = nil
     
+    // Result State
+    @State private var discoveredSpots: [ItinerarySpot] = [] // 識別出的景點
+    @State private var selectedSpotIds: Set<String> = [] // 使用者選中的景點 ID
+    
     var body: some View {
         ZStack {
             Color.white.ignoresSafeArea()
             
-            VStack(spacing: 20) {
+            VStack(spacing: 0) { // spacing: 0 for more control
                 Text("智能導入")
                     .font(.title2).bold()
                     .padding(.top, 24)
+                    .padding(.bottom, 16)
                 
-                // Link Import
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Image(systemName: "link")
-                        Text("文本或鏈接識別")
-                            .font(.headline)
-                    }
-                    .foregroundColor(.black)
-                    
-                    TextEditor(text: $linkText)
-                        .frame(height: 80) // Slightly shorter
-                        .padding(8)
-                        .background(Color.white)
-                        .cornerRadius(8)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.3)))
-                    
-                    if let error = errorMessage {
-                        Text(error)
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    }
-                    
-                    Button(action: handleSmartImport) {
-                        HStack {
-                            if isProcessing {
-                                ProgressView()
-                                    .tint(.black)
-                                    .padding(.trailing, 4)
-                            }
-                            Text(isProcessing ? "識別中..." : "開始識別")
-                        }
-                    }
-                    .disabled(isProcessing || linkText.isEmpty)
-                    .font(.system(size: 14, weight: .bold))
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 16)
-                    .background(Color.gray.opacity(0.2))
-                    .cornerRadius(16)
-                    .foregroundColor(.black)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                if discoveredSpots.isEmpty {
+                    importInputView
+                } else {
+                    importPreviewView
                 }
-                .padding()
-                .background(Color.white)
-                .cornerRadius(20)
-                .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.black, lineWidth: 2))
-                .padding(.horizontal)
-                
-                // Screenshot Import
-                Button(action: {}) {
-                    HStack {
-                        Image(systemName: "photo.on.rectangle")
-                            .font(.title)
-                            .foregroundColor(.black)
-                        VStack(alignment: .leading) {
-                            Text("截圖識別")
-                                .font(.headline)
-                                .foregroundColor(.black)
-                        }
-                        Spacer()
-                    }
-                    .padding()
-                    .background(Color.gray.opacity(0.1))
-                    .cornerRadius(20)
-                }
-                .padding(.horizontal)
-                
-                Spacer()
             }
         }
-        .presentationDetents([.height(350)]) // Fixed lower height
+        .presentationDetents(discoveredSpots.isEmpty ? [.height(350)] : [.large])
         .presentationCornerRadius(32)
+    }
+    
+    private var importInputView: some View {
+        VStack(spacing: 20) {
+            // Link Import
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Image(systemName: "link")
+                    Text("文本或鏈接識別")
+                        .font(.headline)
+                }
+                .foregroundColor(.black)
+                
+                TextEditor(text: $linkText)
+                    .frame(height: 80)
+                    .padding(8)
+                    .background(Color.white)
+                    .cornerRadius(8)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.3)))
+                
+                if let error = errorMessage {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+                
+                Button(action: handleSmartImport) {
+                    HStack {
+                        if isProcessing {
+                            ProgressView()
+                                .tint(.black)
+                                .padding(.trailing, 4)
+                        }
+                        Text(isProcessing ? "識別中..." : "開始識別")
+                    }
+                }
+                .disabled(isProcessing || linkText.isEmpty)
+                .font(.system(size: 14, weight: .bold))
+                .padding(.vertical, 8)
+                .padding(.horizontal, 16)
+                .background(Color.gray.opacity(0.2))
+                .cornerRadius(16)
+                .foregroundColor(.black)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .padding()
+            .background(Color.white)
+            .cornerRadius(20)
+            .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.black, lineWidth: 2))
+            .padding(.horizontal)
+            
+            // Screenshot Import
+            Button(action: {}) {
+                HStack {
+                    Image(systemName: "photo.on.rectangle")
+                        .font(.title)
+                        .foregroundColor(.black)
+                    VStack(alignment: .leading) {
+                        Text("截圖識別")
+                            .font(.headline)
+                            .foregroundColor(.black)
+                    }
+                    Spacer()
+                }
+                .padding()
+                .background(Color.gray.opacity(0.1))
+                .cornerRadius(20)
+            }
+            .padding(.horizontal)
+            
+            Spacer()
+        }
+    }
+    
+    private var importPreviewView: some View {
+        VStack(spacing: 16) {
+            Text("識別成功！請選擇要加入的地點：")
+                .font(.system(size: 14))
+                .foregroundColor(.gray)
+            
+            ScrollView {
+                VStack(spacing: 12) {
+                    ForEach(discoveredSpots) { spot in
+                        HStack(spacing: 12) {
+                            // Checkbox
+                            Button(action: {
+                                if selectedSpotIds.contains(spot.id) {
+                                    selectedSpotIds.remove(spot.id)
+                                } else {
+                                    selectedSpotIds.insert(spot.id)
+                                }
+                            }) {
+                                Image(systemName: selectedSpotIds.contains(spot.id) ? "checkmark.circle.fill" : "circle")
+                                    .font(.system(size: 24))
+                                    .foregroundColor(selectedSpotIds.contains(spot.id) ? PuboColors.navy : .gray)
+                            }
+                            
+                            // Image (If any)
+                            if !spot.image.isEmpty, let url = URL(string: spot.image) {
+                                AsyncImage(url: url) { img in
+                                    img.resizable().aspectRatio(contentMode: .fill)
+                                } placeholder: {
+                                    Color.gray.opacity(0.1)
+                                }
+                                .frame(width: 50, height: 50)
+                                .cornerRadius(8)
+                            } else {
+                                Image(systemName: "mappin.circle.fill")
+                                    .resizable()
+                                    .frame(width: 50, height: 50)
+                                    .foregroundColor(PuboColors.navy)
+                            }
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(spot.name)
+                                    .font(.headline)
+                                Text(spot.place?.address ?? "尚未獲取詳細地址")
+                                    .font(.caption)
+                                    .foregroundColor(.gray)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                        }
+                        .padding()
+                        .background(Color.gray.opacity(0.05))
+                        .cornerRadius(16)
+                    }
+                }
+                .padding(.horizontal)
+            }
+            
+            // Add Confirm Button
+            Button(action: {
+                for spotId in selectedSpotIds {
+                    if let spot = discoveredSpots.first(where: { $0.id == spotId }) {
+                        onAddSpot(spot, nil, nil)
+                    }
+                }
+                onDismiss()
+            }) {
+                Text("確認加入 (\(selectedSpotIds.count))")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 56)
+                    .background(selectedSpotIds.isEmpty ? Color.gray : PuboColors.navy)
+                    .cornerRadius(28)
+                    .padding(.horizontal)
+            }
+            .disabled(selectedSpotIds.isEmpty)
+            .padding(.bottom, 24)
+        }
     }
     
     private func handleSmartImport() {
@@ -387,45 +481,85 @@ struct SmartImportView: View {
                     return
                 }
                 
-                // 3. Process results and add to itinerary
-                await MainActor.run {
-                    for info in result.1 {
-                        let place = info.place
-                        var spot = ItinerarySpot.empty()
-                        spot.name = place.name
-                        spot.latitude = place.latitude
-                        spot.longitude = place.longitude
-                        spot.googlePlaceId = place.googlePlaceId
-                        
-                        // Categories mapping
-                        if let cat = place.category?.lowercased() {
-                            if cat.contains("food") || cat.contains("restaurant") { spot.category = .food }
-                            else if cat.contains("lodging") || cat.contains("hotel") { spot.category = .accommodation }
-                            else if cat.contains("shopping") || cat.contains("store") { spot.category = .shopping }
-                            else { spot.category = .spot }
+                // 3. Save to Library (Collections) - NEW: Sync to collections
+                await DataService.shared.saveContent(result.0, relatedPlaces: result.1)
+                
+                // 4. Transform result to spots for preview
+                var spots: [ItinerarySpot] = []
+                let resolver = POIResolverService()
+                let destination = trip.destination ?? ""
+                let targetRegion = region(for: destination)
+                
+                for info in result.1 {
+                    let place = info.place
+                    var spot = ItinerarySpot.empty()
+                    spot.name = place.name
+                    spot.latitude = place.latitude
+                    spot.longitude = place.longitude
+                    spot.googlePlaceId = place.googlePlaceId
+                    
+                    // If coordinates are zero, try a quick repair with destination bias
+                    if spot.latitude == 0 || spot.latitude == nil {
+                        do {
+                            let repaired = try await resolver.resolvePOI(query: spot.name, region: targetRegion, countryName: destination)
+                            
+                            // 🔍 Aggressive Filter in Preview
+                            let validRepaired = repaired.filter { match in
+                                guard let target = targetRegion else { return true }
+                                let dist = CLLocation(latitude: match.latitude, longitude: match.longitude)
+                                    .distance(from: CLLocation(latitude: target.center.latitude, longitude: target.center.longitude))
+                                return dist < 600_000
+                            }
+                            
+                            if let first = validRepaired.first {
+                                spot.latitude = first.latitude
+                                spot.longitude = first.longitude
+                                spot.place = PlaceInfo(
+                                    name: first.name,
+                                    placeId: spot.id,
+                                    address: first.address,
+                                    latitude: first.latitude,
+                                    longitude: first.longitude,
+                                    category: spot.category?.rawValue ?? "spot",
+                                    rating: nil,
+                                    userRatingsTotal: nil,
+                                    openingHours: nil
+                                )
+                            }
+                        } catch {
+                            print("⚠️ SmartImport inline repair failed for \(spot.name): \(error)")
                         }
-                        
-                        // Add Place Info for details
-                        let openHours: OpenHours? = nil
-                        // Note: Opening hours parsing from backend can be implemented here if needed
-                        
+                    }
+                    
+                    // Map Category (if not already set by repair)
+                    if spot.place == nil {
                         spot.place = PlaceInfo(
                             name: place.name,
                             placeId: place.placeId,
                             address: place.address,
-                            latitude: place.latitude,
-                            longitude: place.longitude,
+                            latitude: spot.latitude,
+                            longitude: spot.longitude,
                             category: place.category,
                             rating: place.rating,
                             userRatingsTotal: place.userRatingCount,
-                            openingHours: openHours
+                            openingHours: nil
                         )
-                        
-                        onAddSpot(spot, nil, nil)
                     }
                     
+                    if let cat = place.category?.lowercased() {
+                        if cat.contains("food") { spot.category = .food }
+                        else if cat.contains("lodging") { spot.category = .accommodation }
+                        else { spot.category = .spot }
+                    }
+                    
+                    spots.append(spot)
+                }
+                
+                await MainActor.run {
+                    self.discoveredSpots = spots
+                    // Default select all
+                    self.selectedSpotIds = Set(spots.map { $0.id })
                     self.isProcessing = false
-                    onDismiss()
                 }
             } catch {
                 await MainActor.run {
@@ -434,6 +568,27 @@ struct SmartImportView: View {
                 }
             }
         }
+    }
+    
+    private func region(for destination: String) -> MKCoordinateRegion? {
+        let dest = destination.lowercased()
+        if dest.contains("korea") || dest.contains("韓國") || dest.contains("首爾") || dest.contains("seoul") || dest.contains("釜山") || dest.contains("busan") {
+            return MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 37.5665, longitude: 126.9780),
+                span: MKCoordinateSpan(latitudeDelta: 4.0, longitudeDelta: 4.0)
+            )
+        } else if dest.contains("japan") || dest.contains("日本") || dest.contains("東京") || dest.contains("tokyo") || dest.contains("大阪") || dest.contains("osaka") || dest.contains("京都") || dest.contains("kyoto") {
+            return MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 35.6762, longitude: 139.6503),
+                span: MKCoordinateSpan(latitudeDelta: 10.0, longitudeDelta: 10.0) // Japan is long
+            )
+        } else if dest.contains("taiwan") || dest.contains("台灣") || dest.contains("台北") || dest.contains("taipei") || dest.contains("高雄") || dest.contains("kaohsiung") {
+            return MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: 23.6978, longitude: 120.9605),
+                span: MKCoordinateSpan(latitudeDelta: 3.0, longitudeDelta: 3.0)
+            )
+        }
+        return nil
     }
 }
 

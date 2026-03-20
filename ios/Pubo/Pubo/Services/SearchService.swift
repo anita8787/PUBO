@@ -3,7 +3,7 @@ import MapKit
 import Combine
 
 protocol SearchProvider {
-    func autocomplete(query: String, sessionToken: String) async throws -> [SearchResult]
+    func autocomplete(query: String, regionCode: String?, sessionToken: String) async throws -> [SearchResult]
     func fetchDetails(placeId: String) async throws -> (lat: Double, lng: Double, address: String?)
 }
 
@@ -16,6 +16,8 @@ class SearchService: ObservableObject {
     private var sessionToken = UUID().uuidString
     private var cancellables = Set<AnyCancellable>()
     private let searchSubject = PassthroughSubject<String, Never>()
+    
+    var regionCode: String? = nil // 當前行程的國家碼 (e.g. KR, JP)
     
     init(apiKey: String) {
         self.googleProvider = GooglePlacesProvider(apiKey: apiKey)
@@ -54,12 +56,12 @@ class SearchService: ObservableObject {
         
         do {
             // Priority 1: Google
-            suggestions = try await googleProvider.autocomplete(query: query, sessionToken: sessionToken)
+            suggestions = try await googleProvider.autocomplete(query: query, regionCode: regionCode, sessionToken: sessionToken)
         } catch {
             print("⚠️ Google Search Failed: \(error). Falling back to MapKit.")
             do {
                 // Priority 2: MapKit Fallback
-                suggestions = try await mkProvider.autocomplete(query: query, sessionToken: sessionToken)
+                suggestions = try await mkProvider.autocomplete(query: query, regionCode: regionCode, sessionToken: sessionToken)
             } catch {
                 print("❌ MapKit Search also failed: \(error)")
                 suggestions = []
@@ -87,8 +89,12 @@ class GooglePlacesProvider: SearchProvider {
         self.apiKey = apiKey
     }
     
-    func autocomplete(query: String, sessionToken: String) async throws -> [SearchResult] {
-        let urlString = "https://maps.googleapis.com/maps/api/place/autocomplete/json?input=\(query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")&sessiontoken=\(sessionToken)&key=\(apiKey)&language=zh-TW"
+    func autocomplete(query: String, regionCode: String?, sessionToken: String) async throws -> [SearchResult] {
+        var urlString = "https://maps.googleapis.com/maps/api/place/autocomplete/json?input=\(query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")&sessiontoken=\(sessionToken)&key=\(apiKey)&language=zh-TW"
+        
+        if let region = regionCode {
+            urlString += "&components=country:\(region.lowercased())"
+        }
         
         guard let url = URL(string: urlString) else { throw URLError(.badURL) }
         
@@ -138,8 +144,10 @@ class MapKitProvider: NSObject, SearchProvider, MKLocalSearchCompleterDelegate {
         completer?.resultTypes = .pointOfInterest
     }
     
-    func autocomplete(query: String, sessionToken: String) async throws -> [SearchResult] {
+    func autocomplete(query: String, regionCode: String?, sessionToken: String) async throws -> [SearchResult] {
         completer?.queryFragment = query
+        // MapKit region highlighting isn't as strict as Google components, but we could set a region here if needed.
+        // For now, focusing on Google as primary.
         
         return try await withCheckedThrowingContinuation { continuation in
             self.continuation = continuation

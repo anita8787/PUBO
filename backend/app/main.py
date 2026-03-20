@@ -80,10 +80,11 @@ async def process_share_task(task_id: str, url: str):
         
         async def enrich_place(p):
             # 優先使用在地化搜尋字串 (包含韓文/日文原文及國家名)
-            search_name = p.get("search_query", p["name"])
-            display_name = p["name"]
+            search_name = p.get("search_query", p.get("name", "Unknown"))
+            display_name = p.get("name", "Unknown")
+            inferred_country = p.get("country", "")
             
-            print(f"🔍 [Backend] Searching for: {search_name} (Display: {display_name})")
+            print(f"🔍 [Backend] Searching for: {search_name} (Display: {display_name}, Country: {inferred_country})")
             
             # 使用 run_in_threadpool 確保同步的 search_place 不會阻塞 Event Loop
             google_place = await run_in_threadpool(places_service.search_place, search_name)
@@ -99,14 +100,14 @@ async def process_share_task(task_id: str, url: str):
             }
 
             if google_place:
+                formatted_address = google_place.get("formattedAddress", "")
+                
                 # Use Google Place ID as the primary ID to ensure deduplication on client side
                 real_id = google_place.get("name", "").split("/")[-1] if "/" in google_place.get("name", "") else google_place.get("id")
                 
                 place_data["place_id"] = real_id
                 place_data["google_place_id"] = real_id
-                # 依然優先使用 AI 解析出的繁體中文顯示名，除非 Google 提供確切名稱
-                # place_data["name"] = google_place.get("displayName", {}).get("text", display_name)
-                place_data["address"] = google_place.get("formattedAddress")
+                place_data["address"] = formatted_address
                 
                 location = google_place.get("location", {})
                 place_data["latitude"] = location.get("latitude", 0.0)
