@@ -19,6 +19,7 @@ struct MapView: View {
     @State private var currentCity = "台北市"
     @State private var searchedPlaces: [MapPlace] = []
     @State private var mapSelection: MapFeature? = nil
+    @EnvironmentObject var tripManager: TripManager
     var onBack: () -> Void
     
     let categories = ["美食", "景點", "文青朝聖"]
@@ -114,6 +115,25 @@ struct MapView: View {
                     }
                 }
             }
+            .onChange(of: tripManager.focusPlaceFromLibrary) { _, newFocus in
+                if let sdPlace = newFocus {
+                    let mapPlace = MapPlace(
+                        id: sdPlace.id,
+                        name: sdPlace.name,
+                        rating: sdPlace.rating ?? 0.0,
+                        category: sdPlace.category ?? "景點",
+                        time: sdPlace.openNow == true ? "營業中" : "",
+                        address: sdPlace.address ?? "",
+                        image: "",
+                        coordinate: CLLocationCoordinate2D(latitude: sdPlace.latitude, longitude: sdPlace.longitude)
+                    )
+                    withAnimation(.easeInOut) {
+                        self.position = .camera(MapCamera(centerCoordinate: mapPlace.coordinate, distance: 3000))
+                        self.selectedPlace = mapPlace
+                    }
+                    tripManager.focusPlaceFromLibrary = nil // clear flag
+                }
+            }
             
             // Floating header components — NO white background
             VStack(alignment: .leading, spacing: 8) {
@@ -183,13 +203,13 @@ struct MapView: View {
                             .padding(.vertical, 8)
                             .background(
                                 selectedCategory == cat
-                                    ? .ultraThinMaterial
-                                    : .ultraThinMaterial
+                                    ? Color.white
+                                    : Color(hex: "F2F2F7")
                             )
                             .overlay(
                                 Capsule().stroke(
-                                    selectedCategory == cat ? Color.black.opacity(0.3) : Color.clear,
-                                    lineWidth: 1
+                                    selectedCategory == cat ? PuboColors.navy : Color.clear,
+                                    lineWidth: 1.5
                                 )
                             )
                             .clipShape(Capsule())
@@ -239,9 +259,32 @@ struct MapView: View {
                     PlaceDetailCard(place: place, onClose: {
                         withAnimation { selectedPlace = nil }
                     })
+                    .id(place.id) // Force trigger state resets & onAppear when place switches
                     .transition(.move(edge: .bottom))
                 }
                 .zIndex(10)
+            }
+        }
+        .onAppear {
+            if let sdPlace = tripManager.focusPlaceFromLibrary {
+                let mapPlace = MapPlace(
+                    id: sdPlace.id,
+                    name: sdPlace.name,
+                    rating: sdPlace.rating ?? 0.0,
+                    category: sdPlace.category ?? "景點",
+                    time: sdPlace.openNow == true ? "營業中" : "",
+                    address: sdPlace.address ?? "",
+                    image: "",
+                    coordinate: CLLocationCoordinate2D(latitude: sdPlace.latitude, longitude: sdPlace.longitude)
+                )
+                withAnimation(.easeInOut) {
+                    if !searchedPlaces.contains(where: { $0.id == mapPlace.id }) {
+                        searchedPlaces.append(mapPlace)
+                    }
+                    self.position = .camera(MapCamera(centerCoordinate: mapPlace.coordinate, distance: 3000))
+                    self.selectedPlace = mapPlace
+                }
+                tripManager.focusPlaceFromLibrary = nil // clear flag
             }
         }
     }
@@ -315,16 +358,16 @@ struct MapSearchOverlay: View {
     }
     
     let popular: [PopularDestination] = [
-        PopularDestination(name: "上海市", image: "https://images.unsplash.com/photo-1537519646099-5e63701ff581?q=80&w=200&auto=format&fit=crop"),
-        PopularDestination(name: "北京市", image: "https://images.unsplash.com/photo-1508804185872-d7badad00f7d?q=80&w=200&auto=format&fit=crop"),
-        PopularDestination(name: "廣州市", image: "https://images.unsplash.com/photo-1583394293214-28ded15ee548?q=80&w=200&auto=format&fit=crop"),
-        PopularDestination(name: "青島市", image: "https://images.unsplash.com/photo-1559827260-dc66d52bef19?q=80&w=200&auto=format&fit=crop"),
-        PopularDestination(name: "南京市", image: "https://images.unsplash.com/photo-1567095761054-7a02e69e5b2b?q=80&w=200&auto=format&fit=crop"),
-        PopularDestination(name: "成都市", image: "https://images.unsplash.com/photo-1590736969955-71cc94901144?q=80&w=200&auto=format&fit=crop"),
-        PopularDestination(name: "重慶市", image: "https://images.unsplash.com/photo-1547981609-4b6bfe67ca0b?q=80&w=200&auto=format&fit=crop"),
-        PopularDestination(name: "杭州市", image: "https://images.unsplash.com/photo-1599571234909-29ed5d1321d6?q=80&w=200&auto=format&fit=crop"),
-        PopularDestination(name: "韓國", image: "https://images.unsplash.com/photo-1553621042-f6e147245754?q=80&w=200&auto=format&fit=crop"),
-        PopularDestination(name: "香港(中國)", image: "https://images.unsplash.com/photo-1536599018102-9f803c140fc1?q=80&w=200&auto=format&fit=crop"),
+        PopularDestination(name: "日本東京", image: "https://images.unsplash.com/photo-1537519646099-5e63701ff581?q=80&w=200&auto=format&fit=crop"),
+        PopularDestination(name: "日本京都", image: "https://images.unsplash.com/photo-1508804185872-d7badad00f7d?q=80&w=200&auto=format&fit=crop"),
+        PopularDestination(name: "日本環球影城", image: "https://images.unsplash.com/photo-1583394293214-28ded15ee548?q=80&w=200&auto=format&fit=crop"),
+        PopularDestination(name: "日本北海道", image: "https://images.unsplash.com/photo-1559827260-dc66d52bef19?q=80&w=200&auto=format&fit=crop"),
+        PopularDestination(name: "韓國首爾", image: "https://images.unsplash.com/photo-1567095761054-7a02e69e5b2b?q=80&w=200&auto=format&fit=crop"),
+        PopularDestination(name: "韓國釜山", image: "https://images.unsplash.com/photo-1590736969955-71cc94901144?q=80&w=200&auto=format&fit=crop"),
+        PopularDestination(name: "泰國曼谷", image: "https://images.unsplash.com/photo-1547981609-4b6bfe67ca0b?q=80&w=200&auto=format&fit=crop"),
+        PopularDestination(name: "越南峴港", image: "https://images.unsplash.com/photo-1599571234909-29ed5d1321d6?q=80&w=200&auto=format&fit=crop"),
+        PopularDestination(name: "台灣台北", image: "https://images.unsplash.com/photo-1553621042-f6e147245754?q=80&w=200&auto=format&fit=crop"),
+        PopularDestination(name: "台灣台南", image: "https://images.unsplash.com/photo-1536599018102-9f803c140fc1?q=80&w=200&auto=format&fit=crop"),
     ]
     
     let columns = [
@@ -610,8 +653,11 @@ struct PlaceDetailCard: View {
                 .fill(Color.gray.opacity(0.3))
                 .frame(width: 48, height: 6)
                 .padding(.top, 12)
+                .padding(.bottom, 8)
             
-            HStack(alignment: .top, spacing: 16) {
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 0) {
+                    HStack(alignment: .top, spacing: 16) {
                 if !place.image.isEmpty {
                     AsyncImage(url: URL(string: place.image)) { phase in
                         if let image = phase.image {
@@ -668,10 +714,11 @@ struct PlaceDetailCard: View {
                             }
                         }
                         
-                        if !place.address.isEmpty {
+                        let dispAddress = detailedAddress ?? place.address
+                        if !dispAddress.isEmpty {
                             HStack(spacing: 4) {
                                 Image(systemName: "mappin.and.ellipse")
-                                Text(place.address)
+                                Text(dispAddress)
                                     .lineLimit(2)
                             }
                         }
@@ -718,7 +765,58 @@ struct PlaceDetailCard: View {
                 }
             }
             .padding(.horizontal, 24)
-            .padding(.bottom, 20)
+            .padding(.bottom, 16)
+            
+            // Google Reviews Section
+            if proReview != nil || conReview != nil {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "hand.thumbsup.fill")
+                            .foregroundColor(PuboColors.blue)
+                            .font(.system(size: 14))
+                        Text("網友點評")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(PuboColors.navy)
+                        Spacer()
+                    }
+                    
+                    VStack(spacing: 8) {
+                        // Positive Review
+                        if let pro = proReview, !pro.isEmpty {
+                            HStack(alignment: .top, spacing: 10) {
+                                Text("👍").font(.system(size: 16))
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(pro)
+                                        .font(.system(size: 13))
+                                        .foregroundColor(.black.opacity(0.8))
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .padding(12)
+                            .background(Color.green.opacity(0.1))
+                            .cornerRadius(8)
+                        }
+                        
+                        // Mixed/Negative Review
+                        if let con = conReview, !con.isEmpty {
+                            HStack(alignment: .top, spacing: 10) {
+                                Text("🤔").font(.system(size: 16))
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(con)
+                                        .font(.system(size: 13))
+                                        .foregroundColor(.black.opacity(0.8))
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .padding(12)
+                            .background(Color.orange.opacity(0.1))
+                            .cornerRadius(8)
+                        }
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 20)
+            }
             
             // Add to Trip Button
             Button(action: { showAddSheet = true }) {
@@ -735,6 +833,9 @@ struct PlaceDetailCard: View {
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 36)
+                } // End inner VStack
+            } // End ScrollView
+            .frame(maxHeight: 330) // Limit maximum height to clip exactly right after description
         }
         .background(Color.white)
         .cornerRadius(40, corners: [.topLeft, .topRight])
@@ -744,6 +845,7 @@ struct PlaceDetailCard: View {
                 .stroke(PuboColors.cardOrange, lineWidth: 2)
         )
         .onAppear {
+            fetchDetailedAddress()
             fetchAIDescription()
         }
         .sheet(isPresented: $showAddSheet) {
@@ -758,7 +860,39 @@ struct PlaceDetailCard: View {
     @EnvironmentObject var tripManager: TripManager
     @State private var showAddSheet = false
     @State private var description: String? = nil
+    @State private var proReview: String? = nil
+    @State private var conReview: String? = nil
     @State private var isLoadingDescription = false
+    @State private var detailedAddress: String? = nil
+    
+    private func fetchDetailedAddress() {
+        let geocoder = CLGeocoder()
+        let location = CLLocation(latitude: place.coordinate.latitude, longitude: place.coordinate.longitude)
+        
+        Task {
+            do {
+                let placemarks = try await geocoder.reverseGeocodeLocation(location)
+                if let placemark = placemarks.first {
+                    let addressParts = [
+                        placemark.administrativeArea,
+                        placemark.locality,
+                        placemark.subLocality,
+                        placemark.thoroughfare,
+                        placemark.subThoroughfare
+                    ].compactMap { $0 }
+                    
+                    let fullAddress = addressParts.joined(separator: " ")
+                    if !fullAddress.isEmpty {
+                        await MainActor.run {
+                            self.detailedAddress = fullAddress
+                        }
+                    }
+                }
+            } catch {
+                print("⚠️ Reverse geocoding failed: \(error)")
+            }
+        }
+    }
     
     private func fetchAIDescription() {
         guard description == nil else { return }
@@ -771,7 +905,7 @@ struct PlaceDetailCard: View {
                 // It should either use Config.baseURL + "/api/v1/analyze/place"
                 // or similar, so it works natively without require local python server
                 // let url = URL(string: "http://127.0.0.1:8000/api/v1/analyze/place")!
-                let urlString = "https://pubo-pink.vercel.app/api/v1/analyze/place"
+                let urlString = "http://192.168.1.168:8000/api/v1/analyze/place"
                 
                 guard let url = URL(string: urlString) else {
                     throw APIError.invalidURL
@@ -790,10 +924,26 @@ struct PlaceDetailCard: View {
                 request.httpBody = try? JSONSerialization.data(withJSONObject: body)
                 
                 let (data, _) = try await URLSession.shared.data(for: request)
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let desc = json["description"] as? String {
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     await MainActor.run {
-                        self.description = desc
+                        if let desc = json["description"] as? String {
+                            var cleanDesc = desc
+                            if let descData = desc.data(using: .utf8),
+                               let parsedDesc = try? JSONSerialization.jsonObject(with: descData) as? [String: Any],
+                               let intro = parsedDesc["introduction"] as? String {
+                                cleanDesc = intro
+                            }
+                            self.description = cleanDesc
+                        }
+                        
+                        if let pro = json["pro_comment"] as? String {
+                            self.proReview = pro
+                        }
+                        
+                        if let con = json["con_comment"] as? String {
+                            self.conReview = con
+                        }
+                        
                         self.isLoadingDescription = false
                     }
                 }

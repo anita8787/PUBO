@@ -126,7 +126,13 @@ struct LibraryDetailView: View {
                     // 3. Spots List
                     LazyVStack(spacing: 16) {
                         ForEach(content.places) { place in
-                            LibraryPlaceRow(place: place)
+                            Button(action: {
+                                NotificationCenter.default.post(name: NSNotification.Name("FocusMapOnPlace"), object: place)
+                                dismiss() // Dismiss LibraryDetailView
+                            }) {
+                                LibraryPlaceRow(place: place)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                     .padding(.horizontal, 24)
@@ -189,17 +195,7 @@ struct LibraryPlaceRow: View {
                         .lineLimit(2)
                 }
                 
-                HStack {
-                    if let cat = place.category {
-                        Text(cat.capitalized) // Or map to "Shinto Shrine" etc.
-                            .font(.caption2)
-                            .foregroundColor(PuboColors.blue)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(PuboColors.blue.opacity(0.1))
-                            .cornerRadius(8)
-                    }
-                    
+                HStack(spacing: 8) {
                     if let rating = place.rating {
                         HStack(spacing: 2) {
                             Image(systemName: "star.fill")

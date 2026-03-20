@@ -24,6 +24,8 @@ struct TripMapPlanningView: View {
     }
     
     @State private var routes: [MKRoute] = [] // 真實導航路線條
+    @State private var curvedPaths: [[CLLocationCoordinate2D]] = [] // 曲線備援路徑
+
 
     
     var body: some View {
@@ -95,15 +97,31 @@ struct TripMapPlanningView: View {
                     MapPolyline(route)
                         .stroke(Color(hex: "FFC649").opacity(0.8), lineWidth: 5)
                 }
-            } else if spots.count >= 2 {
-                // Fallback to straight lines if routes are not yet loaded
+            }
+            
+            // 曲線或直線備援 (Curved Fallbacks)
+            // 如果主要道路載入失敗 (如韓國地區)，則顯示優美的曲線
+            if !curvedPaths.isEmpty {
+                ForEach(Array(curvedPaths.enumerated()), id: \.offset) { _, path in
+                    MapPolyline(coordinates: path)
+                        .stroke(
+                            LinearGradient(
+                                colors: [Color(hex: "FFC649"), Color(hex: "FFC649").opacity(0.3)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            ),
+                            lineWidth: 3
+                        )
+                }
+            } else if routes.isEmpty && spots.count >= 2 {
+                // 如果連曲線都還沒算好，暫時用直線
                 MapPolyline(coordinates: spots.compactMap { spot in
                     if let coord = spot.coordinate {
                         return CLLocationCoordinate2D(latitude: coord.lat, longitude: coord.long)
                     }
                     return nil
                 })
-                .stroke(Color(hex: "FFC649").opacity(0.4), lineWidth: 3)
+                .stroke(Color(hex: "FFC649").opacity(0.3), lineWidth: 2)
             }
         }
         .mapStyle(.standard(elevation: .realistic))
@@ -112,11 +130,11 @@ struct TripMapPlanningView: View {
             updateMapToFitSpots()
             calculateRoutes()
         }
-        .onChange(of: selectedDayIndex) {
+        .onChange(of: selectedDayIndex) { _, _ in
             updateMapToFitSpots()
             calculateRoutes()
         }
-        .onChange(of: spots.count) {
+        .onChange(of: spots.count) { _, _ in
             updateMapToFitSpots()
             calculateRoutes()
         }
@@ -164,8 +182,61 @@ struct TripMapPlanningView: View {
             
             await MainActor.run {
                 self.routes = newRoutes
+                // 如果道路抓取不全，則為剩餘段落生成「曲線」
+                self.generateCurvedFallbacks()
             }
         }
+    }
+    
+    /// 生成優美的二次貝茲曲線坐標點，作為直線的替代方案
+    private func generateCurvedFallbacks() {
+        guard spots.count >= 2 else {
+            self.curvedPaths = []
+            return
+        }
+        
+        var paths: [[CLLocationCoordinate2D]] = []
+        
+        for i in 0..<(spots.count - 1) {
+            guard let start = spots[i].coordinate,
+                  let end = spots[i+1].coordinate else { continue }
+            
+            // 如果這一段已經有實景道路模型了，就跳過不畫曲線
+            // (簡單判定：如果 routes 數量跟 index 對得上則跳過，但為了保險起見，
+            //  在韓國等地區通常 routes 會是空的，所以這裡會全部畫出優點曲線)
+            if routes.count > i { continue }
+            
+            let p0 = CLLocationCoordinate2D(latitude: start.lat, longitude: start.long)
+            let p2 = CLLocationCoordinate2D(latitude: end.lat, longitude: end.long)
+            
+            // 計算控制點 P1 (取中點並向垂直方向偏移)
+            let midLat = (p0.latitude + p2.latitude) / 2
+            let midLon = (p0.longitude + p2.longitude) / 2
+            
+            // 偏移量：根據距離調整，避免太灣或太直
+            let latDiff = p2.latitude - p0.latitude
+            let lonDiff = p2.longitude - p0.longitude
+            let offset: Double = 0.15 
+            
+            // 垂直向量 (-dy, dx)
+            let controlP1 = CLLocationCoordinate2D(
+                latitude: midLat - lonDiff * offset,
+                longitude: midLon + latDiff * offset
+            )
+            
+            // 生成 50 個點構成平滑曲線
+            var curvePoints: [CLLocationCoordinate2D] = []
+            let segments = 30
+            for t_idx in 0...segments {
+                let t = Double(t_idx) / Double(segments)
+                let lat = pow(1-t, 2) * p0.latitude + 2 * (1-t) * t * controlP1.latitude + pow(t, 2) * p2.latitude
+                let lon = pow(1-t, 2) * p0.longitude + 2 * (1-t) * t * controlP1.longitude + pow(t, 2) * p2.longitude
+                curvePoints.append(CLLocationCoordinate2D(latitude: lat, longitude: lon))
+            }
+            paths.append(curvePoints)
+        }
+        
+        self.curvedPaths = paths
     }
     
     private func updateMapToFitSpots() {

@@ -104,3 +104,88 @@ final class SDContent {
         self.createdAt = createdAt
     }
 }
+
+@Model
+final class SDTrip {
+    @Attribute(.unique) var id: String
+    var title: String
+    var destination: String?
+    var startDate: Date?
+    var endDate: Date?
+    var coverImageUrl: String?
+    var transportMode: String?
+    
+    @Relationship(deleteRule: .cascade, inverse: \SDItineraryDay.trip)
+    var days: [SDItineraryDay] = []
+    
+    var createdAt: Date = Date()
+    
+    init(id: String, title: String, destination: String? = nil, startDate: Date? = nil, endDate: Date? = nil, coverImageUrl: String? = nil, transportMode: String? = nil) {
+        self.id = id
+        self.title = title
+        self.destination = destination
+        self.startDate = startDate
+        self.endDate = endDate
+        self.coverImageUrl = coverImageUrl
+        self.transportMode = transportMode
+    }
+}
+
+@Model
+final class SDItineraryDay {
+    @Attribute(.unique) var id: Int // Backend uses Int for Day ID
+    var dayOrder: Int?
+    var date: Date?
+    var weekday: String?
+    var title: String?
+    
+    var trip: SDTrip?
+    
+    @Relationship(deleteRule: .cascade, inverse: \SDItinerarySpot.day)
+    var spots: [SDItinerarySpot] = []
+    
+    init(id: Int, dayOrder: Int? = nil, date: Date? = nil, weekday: String? = nil, title: String? = nil) {
+        self.id = id
+        self.dayOrder = dayOrder
+        self.date = date
+        self.weekday = weekday
+        self.title = title
+    }
+}
+
+@Model
+final class SDItinerarySpot {
+    @Attribute(.unique) var id: String
+    var name: String
+    var category: String? // Store raw value
+    var startTime: String?
+    var stayDuration: String?
+    var notes: [String] = []
+    var imageUrl: String?
+    var googlePlaceId: String?
+    var latitude: Double?
+    var longitude: Double?
+    var sortOrder: Int?
+    var travelMode: String? // Store raw value
+    var travelTime: String?
+    var travelDistance: String?
+    
+    var day: SDItineraryDay?
+    
+    init(id: String, name: String, category: String? = nil, startTime: String? = nil, stayDuration: String? = nil, notes: [String] = [], imageUrl: String? = nil, googlePlaceId: String? = nil, latitude: Double? = nil, longitude: Double? = nil, sortOrder: Int? = nil, travelMode: String? = nil, travelTime: String? = nil, travelDistance: String? = nil) {
+        self.id = id
+        self.name = name
+        self.category = category
+        self.startTime = startTime
+        self.stayDuration = stayDuration
+        self.notes = notes
+        self.imageUrl = imageUrl
+        self.googlePlaceId = googlePlaceId
+        self.latitude = latitude
+        self.longitude = longitude
+        self.sortOrder = sortOrder
+        self.travelMode = travelMode
+        self.travelTime = travelTime
+        self.travelDistance = travelDistance
+    }
+}

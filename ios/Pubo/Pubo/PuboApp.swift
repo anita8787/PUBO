@@ -15,7 +15,13 @@ struct PuboApp: App {
     
     init() {
         do {
-            container = try ModelContainer(for: SDContent.self, SDPlace.self)
+            container = try ModelContainer(for: 
+                SDContent.self, 
+                SDPlace.self,
+                SDTrip.self,
+                SDItineraryDay.self,
+                SDItinerarySpot.self
+            )
         } catch {
             fatalError("Failed to ModelContainer: \(error)")
         }
@@ -35,6 +41,9 @@ struct PuboApp: App {
                     .modelContainer(container)
                     .onAppear {
                         DataService.shared.setContext(container.mainContext)
+                        tripManager.modelContext = container.mainContext
+                        // Initial sync check if trips already exist in manager
+                        tripManager.refreshTrips()
                     }
                     .onOpenURL { url in
                         print("🔗 Open URL: \(url)")

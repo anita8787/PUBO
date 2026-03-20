@@ -482,7 +482,7 @@ struct SmartImportView: View {
                 }
                 
                 // 3. Save to Library (Collections) - NEW: Sync to collections
-                await DataService.shared.saveContent(result.0, relatedPlaces: result.1)
+                DataService.shared.saveContent(result.0, relatedPlaces: result.1)
                 
                 // 4. Transform result to spots for preview
                 var spots: [ItinerarySpot] = []
@@ -503,13 +503,8 @@ struct SmartImportView: View {
                         do {
                             let repaired = try await resolver.resolvePOI(query: spot.name, region: targetRegion, countryName: destination)
                             
-                            // 🔍 Aggressive Filter in Preview
-                            let validRepaired = repaired.filter { match in
-                                guard let target = targetRegion else { return true }
-                                let dist = CLLocation(latitude: match.latitude, longitude: match.longitude)
-                                    .distance(from: CLLocation(latitude: target.center.latitude, longitude: target.center.longitude))
-                                return dist < 600_000
-                            }
+                            // Skip distance boundary filter since users may import international places into local trips
+                            let validRepaired = repaired
                             
                             if let first = validRepaired.first {
                                 spot.latitude = first.latitude
@@ -1071,6 +1066,12 @@ struct SavedPlacesResultView: View {
                                 else if cat.contains("lodging") { s.category = .accommodation }
                                 else { s.category = .spot }
                             }
+                            
+                            // 繼承收藏清單(SDContent)的原始封面圖
+                            if let imgUrl = place.contents.first?.previewThumbnailUrl {
+                                s.imageUrl = imgUrl
+                            }
+                            
                             return s
                         }
                         onAdd(spots)

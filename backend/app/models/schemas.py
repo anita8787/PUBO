@@ -11,7 +11,7 @@ class TaskStatus(str, Enum):
 
 # --- Place Schemas ---
 class PlaceBase(BaseModel):
-    place_id: str
+    place_id: Optional[str] = None
     google_place_id: Optional[str] = None
     name: str
     address: Optional[str] = None
@@ -22,6 +22,7 @@ class PlaceBase(BaseModel):
     user_ratings_total: Optional[int] = None
     opening_hours: Optional[Dict[str, Any]] = None
     open_now: Optional[bool] = None
+    image_url: Optional[str] = None # 新增：景點圖片 URL
 
 class PlaceCreate(PlaceBase):
     pass
@@ -83,6 +84,8 @@ class AnalyzeRequest(BaseModel):
 
 class AnalyzeResponse(BaseModel):
     description: str
+    pro_comment: Optional[str] = None
+    con_comment: Optional[str] = None
 
 # --- Trip Planning Schemas ---
 

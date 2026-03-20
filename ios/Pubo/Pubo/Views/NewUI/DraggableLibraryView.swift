@@ -214,7 +214,7 @@ struct DraggableLibraryView: View {
             }
             .sheet(item: $selectedContent) { content in
                 LibraryDetailView(content: content)
-                    .presentationDetents([.large])
+                    .presentationDetents([.fraction(0.75), .large])
                     .presentationDragIndicator(.visible)
             }
             .alert("新增分類", isPresented: $showingAddCategoryAlert) {

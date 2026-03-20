@@ -49,6 +49,7 @@ class Place(Base):
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
     category = Column(String, nullable=True) # 餐廳、咖啡、景點、商店等
+    image_url = Column(String, nullable=True) # 新增：景點圖片 URL
     
     # Smart Itinerary Fields
     rating = Column(Float, nullable=True)
@@ -133,6 +134,17 @@ class ItinerarySpot(Base):
     # Relationships
     day = relationship("ItineraryDay", back_populates="spots")
     place = relationship("Place")
+
+class AIAnalysisCache(Base):
+    __tablename__ = "ai_analysis_cache"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    place_name = Column(String, index=True)
+    address = Column(String, nullable=True)
+    result = Column(JSON, nullable=False) # Stores {"description": "...", "pro_comment": "...", "con_comment": "..."}
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 # Database Setup
 from sqlalchemy import create_engine

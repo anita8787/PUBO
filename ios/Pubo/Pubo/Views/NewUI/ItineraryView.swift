@@ -68,7 +68,7 @@ struct TripListView: View {
                     
                     HStack(spacing: 12) {
                         // Suitcase Button (New Trip)
-                        Button(action: { withAnimation { showNewTripModal = true } }) {
+                        Button(action: { showNewTripModal = true }) {
                             Image(systemName: "briefcase")
                                 .font(.system(size: 20, weight: .bold))
                                 .foregroundColor(PuboColors.navy)
@@ -162,17 +162,21 @@ struct TripListView: View {
             }
             .background(Color.white) // Ensure solid background to prevent overlap
             
-            if showNewTripModal {
-                NewTripModalView(
-                    isPresented: $showNewTripModal,
-                    onCreateTrip: { title, destination, start, end in
-                        tripManager.addTrip(title: title, destination: destination, startDate: start, endDate: end)
-                    }
-                )
+            Group {
+                if showNewTripModal {
+                    NewTripModalView(
+                        isPresented: $showNewTripModal,
+                        onCreateTrip: { title, destination, start, end in
+                            tripManager.addTrip(title: title, destination: destination, startDate: start, endDate: end)
+                        }
+                    )
                     .transition(.opacity)
-                    .zIndex(100)
+                }
             }
+            .animation(.easeInOut, value: showNewTripModal)
+            .zIndex(100)
         }
+        .ignoresSafeArea(.keyboard, edges: .bottom) // Prevent background cards from squishing/scaling via keyboard avoidance
     }
 }
 
@@ -206,6 +210,7 @@ struct TripDetailView: View {
     @State private var navigationPart2URL: URL?
     @State private var isSorting = false
     @State private var showLongImagePreview = false
+    @State private var showKoreaMapOptions = false // Toggle for KR action sheet
 
     @State private var isAddingSpotSheet = false // New Dashboard Sheet state
 
@@ -758,8 +763,28 @@ struct TripDetailView: View {
                 .padding(.bottom, 80)
             } // End VStack (Floating)
         } // End ZStack (planningView)
+        .confirmationDialog("選擇導航地圖", isPresented: $showKoreaMapOptions, titleVisibility: .visible) {
+            Button("Naver Map") {
+                launchNaverMap(spots: currentDaySpots.filter { $0.category != .accommodation })
+            }
+            Button("Google Maps") {
+                launchGoogleMaps(spots: currentDaySpots.filter { $0.category != .accommodation }, forceTransit: true)
+            }
+            Button("取消", role: .cancel) { }
+        } message: {
+            Text("部分韓國景點在 Google Maps 上的路線與位置可能不夠精確。")
+        }
     }
     // MARK: - Navigation Logic
+    
+    var isSouthKorea: Bool {
+        let spots = currentDaySpots.filter { $0.category != .accommodation }
+        return spots.contains { spot in
+            guard let lat = spot.latitude, let lon = spot.longitude else { return false }
+            return lat > 33.0 && lat < 38.6 && lon > 124.5 && lon < 132.0 // Rough bounding box for KR
+        }
+    }
+    
     func handleNavigation() {
         // 1. Get ONLY current day's spots for sharing
         let spots = currentDaySpots.filter { $0.category != .accommodation }
@@ -768,10 +793,17 @@ struct TripDetailView: View {
             return 
         }
         
-        // 2. Determine Mode
-        let mode = getDominantTransportMode(for: spots)
+        // 2. Intercept for Korea Routing
+        if isSouthKorea {
+            showKoreaMapOptions = true
+        } else {
+            launchGoogleMaps(spots: spots)
+        }
+    }
+    
+    func launchGoogleMaps(spots: [ItinerarySpot], forceTransit: Bool = false) {
+        let mode = forceTransit ? .train : getDominantTransportMode(for: spots)
         
-        // 3. Split Check (Google Maps limit ~10 waypoints + origin + destination)
         if spots.count > 10 {
             let mid = spots.count / 2
             let part1 = Array(spots[0...mid])
@@ -785,6 +817,24 @@ struct TripDetailView: View {
             if let url = generateGoogleMapsUrl(spots: spots, mode: mode) {
                 print("🚀 Launching Google Maps: \(url)")
                 UIApplication.shared.open(url)
+            }
+        }
+    }
+    
+    func launchNaverMap(spots: [ItinerarySpot]) {
+        guard let first = spots.first, let last = spots.last else { return }
+        let originName = first.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let destName = last.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        
+        let urlStr = "nmap://route/public?slat=\(first.latitude ?? 0)&slng=\(first.longitude ?? 0)&sname=\(originName)&dlat=\(last.latitude ?? 0)&dlng=\(last.longitude ?? 0)&dname=\(destName)&appname=Pubo"
+        
+        if let url = URL(string: urlStr) {
+            UIApplication.shared.open(url, options: [:]) { success in
+                if !success { // Fallback if app is not installed
+                    if let store = URL(string: "https://apps.apple.com/app/id311867728") {
+                        UIApplication.shared.open(store)
+                    }
+                }
             }
         }
     }
@@ -824,15 +874,18 @@ struct TripDetailView: View {
     }
     
     func formatLocation(_ spot: ItinerarySpot) -> String {
-        // Priority: Coordinate > Address > Name
+        // Priority: Name > Coordinate
+        if !spot.name.isEmpty {
+            return spot.name
+        }
+        
+        // Fallback to coordinate
         if let lat = spot.latitude, let lon = spot.longitude {
-            // Only use coordinates if they are valid (not 0.0, 0.0)
             if lat != 0.0 && lon != 0.0 {
                 return "\(lat),\(lon)"
             }
         }
-        // Fallback to name (URL encoded automatically by URLComponents)
-        return spot.name
+        return ""
     }
     
     func getDominantTransportMode(for spots: [ItinerarySpot]) -> TransportType {

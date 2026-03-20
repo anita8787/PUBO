@@ -35,27 +35,25 @@ struct ShareTripModal: View {
                     HStack(spacing: 16) {
                         // 1. Collaborate Button
                         ActionButton(
-                            title: "與好友共同編輯",
-                            subtitle: "匯集大家的 Idea",
-                            icon: "person.2.fill",
+                            title: "共同編輯",
+                            subtitle: "邀請您的旅遊夥伴",
                             illustration: "share-illustration",
                             bgColor: PuboColors.yellow,
                             textColor: PuboColors.navy,
-                            imgWidth: 120,
-                            imgOffset: CGPoint(x: 25, y: 35),
+                            imgWidth: 100,
+                            imgOffset: CGPoint(x: 10, y: 10),
                             action: { onCollaborate?() }
                         )
                         
                         // 2. Export Image Button
                         ActionButton(
-                            title: "生成長圖分享",
-                            subtitle: "曬出你的旅行計畫",
-                            icon: "photo.on.rectangle.angled",
+                            title: "匯出長圖",
+                            subtitle: "邀請您的旅遊夥伴",
                             illustration: "picture-illustration",
                             bgColor: PuboColors.navy,
                             textColor: .white,
-                            imgWidth: 90,
-                            imgOffset: CGPoint(x: 20, y: 30),
+                            imgWidth: 100, // Enlarged
+                            imgOffset: CGPoint(x: 10, y: 20), // Tweak offset to push it slighty downward
                             action: { onGenerateImage?() }
                         )
                     }
@@ -88,7 +86,6 @@ struct ShareTripModal: View {
 struct ActionButton: View {
     let title: String
     let subtitle: String
-    let icon: String
     let illustration: String
     let bgColor: Color
     let textColor: Color
@@ -105,22 +102,19 @@ struct ActionButton: View {
                     .aspectRatio(contentMode: .fit)
                     .frame(width: imgWidth)
                     .offset(x: imgOffset.x, y: imgOffset.y)
-                    .opacity(0.95)
+                    .opacity(1.0)
                 
                 // Text Overlay - Layer 1
                 VStack(alignment: .leading, spacing: 6) {
-                    Image(systemName: icon)
-                        .font(.system(size: 24))
-                        .padding(.bottom, 2)
-                    
                     Text(title)
-                        .font(.system(size: 18, weight: .black))
+                        .font(.system(size: 18, weight: .bold))
                     Text(subtitle)
-                        .font(.system(size: 11))
+                        .font(.system(size: 10))
                         .opacity(0.8)
                     Spacer()
                 }
-                .padding(20)
+                .padding(.top, 16)
+                .padding(.leading, 16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
             .foregroundColor(textColor)

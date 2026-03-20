@@ -6,8 +6,10 @@ from datetime import timedelta
 
 from ..models.database import get_db, init_db, Task, SessionLocal, Trip, ItineraryDay, ItinerarySpot, Place
 from ..models import schemas
+from ..services.image_service import ImageService
 
 router = APIRouter()
+image_service = ImageService()
 
 # --- Trip Endpoints ---
 
@@ -98,71 +100,80 @@ def delete_trip(trip_id: str, db: Session = Depends(get_db)):
 
 @router.post("/days/{day_id}/spots", response_model=schemas.SpotResponse)
 def add_spot(day_id: int, spot: schemas.SpotCreate, db: Session = Depends(get_db)):
-    day = db.query(ItineraryDay).filter(ItineraryDay.id == day_id).first()
-    if not day:
-        raise HTTPException(status_code=404, detail="Day not found")
+    try:
+        day = db.query(ItineraryDay).filter(ItineraryDay.id == day_id).first()
+        if not day:
+            raise HTTPException(status_code=404, detail="Day not found")
+            
+        # Calculate sort order (append to end)
+        count = db.query(ItinerarySpot).filter(ItinerarySpot.day_id == day_id).count()
         
-    # Calculate sort order (append to end)
-    count = db.query(ItinerarySpot).filter(ItinerarySpot.day_id == day_id).count()
-    
-    # Resolve Place ID (Link to places table)
-    final_place_id = spot.place_id
-    
-    if not final_place_id and spot.google_place_id:
-        # Try to find existing place by External ID (stored in place_id column)
-        existing_place = db.query(Place).filter(Place.place_id == spot.google_place_id).first()
-        if existing_place:
-            final_place_id = existing_place.id
-        elif spot.place:
-            # Create new Place from Pydantic model
-            p_data = spot.place
-            
-            # opening_hours is already a dict in PlaceBase schema
-            oh_data = p_data.opening_hours if p_data.opening_hours else None
-            
-            new_place = Place(
-                place_id=spot.google_place_id,
-                name=p_data.name or spot.name,
-                address=p_data.address,
-                latitude=p_data.latitude or spot.latitude,
-                longitude=p_data.longitude or spot.longitude,
-                category=p_data.category or spot.category,
-                rating=p_data.rating,
-                user_ratings_total=p_data.user_ratings_total,
-                opening_hours=oh_data
-            )
-            db.add(new_place)
-            db.commit()
-            db.refresh(new_place)
-            final_place_id = new_place.id
-            
-    new_spot = ItinerarySpot(
-        id=str(uuid.uuid4()),
-        day_id=day_id,
-        place_id=final_place_id,
-        name=spot.name,
-        category=spot.category,
-        start_time=spot.start_time,
-        stay_duration=spot.stay_duration,
-        notes=spot.notes,
-        image_url=spot.image_url,
-        latitude=spot.latitude,
-        longitude=spot.longitude,
-        sort_order=count,
-        travel_mode=spot.travel_mode,
-        travel_time=spot.travel_time,
-        travel_distance=spot.travel_distance
-    )
-    
-    db.add(new_spot)
-    db.commit()
-    
-    # Eager load the place relationship to return full data (including opening_hours)
-    # db.refresh(new_spot) might not load relationships
-    from sqlalchemy.orm import joinedload
-    full_spot = db.query(ItinerarySpot).options(joinedload(ItinerarySpot.place)).filter(ItinerarySpot.id == new_spot.id).first()
-    
-    return full_spot
+        # Resolve Place ID (Link to places table)
+        final_place_id = spot.place_id
+        
+        # Sanitize google_place_id: Treat empty string as None
+        g_id = spot.google_place_id if spot.google_place_id and spot.google_place_id.strip() != "" else None
+        
+        if not final_place_id and g_id:
+            # Try to find existing place by External ID
+            existing_place = db.query(Place).filter(Place.place_id == g_id).first()
+            if existing_place:
+                final_place_id = existing_place.id
+            elif spot.place:
+                # Create new Place from Pydantic model
+                p_data = spot.place
+                
+                # opening_hours is already a dict in PlaceBase schema
+                oh_data = p_data.opening_hours if p_data.opening_hours else None
+                
+                new_place = Place(
+                    place_id=g_id,
+                    name=p_data.name or spot.name,
+                    address=p_data.address,
+                    latitude=p_data.latitude or spot.latitude,
+                    longitude=p_data.longitude or spot.longitude,
+                    category=p_data.category or spot.category,
+                    rating=p_data.rating,
+                    user_ratings_total=p_data.user_ratings_total,
+                    opening_hours=oh_data,
+                    image_url=p_data.image_url or image_service.fetch_fallback_image(p_data.name or spot.name)
+                )
+                db.add(new_place)
+                db.commit()
+                db.refresh(new_place)
+                final_place_id = new_place.id
+                
+        new_spot = ItinerarySpot(
+            id=str(uuid.uuid4()),
+            day_id=day_id,
+            place_id=final_place_id,
+            name=spot.name,
+            category=spot.category,
+            start_time=spot.start_time,
+            stay_duration=spot.stay_duration,
+            notes=spot.notes,
+            image_url=spot.image_url,
+            latitude=spot.latitude,
+            longitude=spot.longitude,
+            sort_order=count,
+            travel_mode=spot.travel_mode,
+            travel_time=spot.travel_time,
+            travel_distance=spot.travel_distance
+        )
+        
+        db.add(new_spot)
+        db.commit()
+        
+        # Eager load the place relationship to return full data
+        from sqlalchemy.orm import joinedload
+        full_spot = db.query(ItinerarySpot).options(joinedload(ItinerarySpot.place)).filter(ItinerarySpot.id == new_spot.id).first()
+        
+        return full_spot
+    except Exception as e:
+        import traceback
+        print(f"❌ [trips.py] add_spot error: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.put("/spots/{spot_id}", response_model=schemas.SpotResponse)
 def update_spot(spot_id: str, spot_update: schemas.SpotUpdate, db: Session = Depends(get_db)):

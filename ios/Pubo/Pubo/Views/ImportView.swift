@@ -99,7 +99,7 @@ struct ImportView: View {
                                 }
                                 
                                 HStack(spacing: 8) {
-                                    if let rating = info.place.rating, let count = info.place.userRatingCount {
+                                    if let rating = info.place.rating {
                                         HStack(spacing: 2) {
                                             Image(systemName: "star.fill")
                                                 .foregroundColor(.yellow)
@@ -107,9 +107,11 @@ struct ImportView: View {
                                             Text(String(format: "%.1f", rating))
                                                 .font(.caption2)
                                                 .fontWeight(.semibold)
-                                            Text("(\(count))")
-                                                .font(.caption2)
-                                                .foregroundColor(.secondary)
+                                            if let count = info.place.userRatingCount {
+                                                Text("(\(count))")
+                                                    .font(.caption2)
+                                                    .foregroundColor(.secondary)
+                                            }
                                         }
                                     }
                                     

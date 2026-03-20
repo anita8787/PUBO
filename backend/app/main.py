@@ -6,11 +6,12 @@ import random
 import uuid
 from sqlalchemy.orm import Session
 from .models import schemas
-from .models.database import get_db, init_db, Task, SessionLocal
+from .models.database import get_db, init_db, Task, SessionLocal, AIAnalysisCache
 from .services.places_service import PlacesService
 from .services.apify_service import ApifyService
 from .services.nlp_service import NLPService
 from .services.youtube_service import YouTubeService
+from .services.image_service import ImageService
 from .api import trips
 
 app = FastAPI()
@@ -22,6 +23,7 @@ apify_service = ApifyService()
 nlp_service = NLPService()
 youtube_service = YouTubeService()
 places_service = PlacesService()
+image_service = ImageService()
 
 @app.on_event("startup")
 def on_startup():
@@ -99,7 +101,7 @@ async def process_share_task(task_id: str, url: str):
         # 3. 使用 Google Places API 搜尋確切地點資訊 (Parallel Execution)
         import asyncio
         
-        async def enrich_place(p):
+        async def enrich_place(p, post_thumbnail=None):
             # 優先使用在地化搜尋字串 (包含韓文/日文原文及國家名)
             search_name = p.get("search_query", p.get("name", "Unknown"))
             display_name = p.get("name", "Unknown")
@@ -142,14 +144,25 @@ async def process_share_task(task_id: str, url: str):
                 if "primaryType" in google_place:
                     place_data["category"] = google_place["primaryType"].replace("_", " ").title()
 
+            # 🔴 抗灰格方案：如果這個景點目前還沒有圖片，則繼承貼文原始封面圖 (防止行程出現灰色方塊)
+            if not place_data.get("image_url") and post_thumbnail:
+                place_data["image_url"] = post_thumbnail
+            
+            # 🔵 終極補水方案：如果還是沒圖片，則透過搜尋引擎強行「補照片」
+            if not place_data.get("image_url"):
+                fallback_img = await run_in_threadpool(image_service.fetch_fallback_image, search_name)
+                if fallback_img:
+                    place_data["image_url"] = fallback_img
+
             return schemas.ContentPlaceInfo(
                 place=schemas.PlaceBase(**place_data),
                 evidence_text=p.get("evidence_text"),
                 confidence_score=p.get("confidence_score", 0.0)
             )
 
-        # 並行執行所有搜尋
-        enriched_places = await asyncio.gather(*(enrich_place(p) for p in extracted_places))
+        # 並行執行所有搜尋，同時傳入貼文封面作為備援圖
+        post_thumb = scraped_data.get("preview_thumbnail_url")
+        enriched_places = await asyncio.gather(*(enrich_place(p, post_thumb) for p in extracted_places))
 
         # 4. 封裝結果
         content_base = schemas.ContentBase(
@@ -241,9 +254,40 @@ async def list_places():
     return []
 
 @app.post("/api/v1/analyze/place", response_model=schemas.AnalyzeResponse)
-async def analyze_place(request: schemas.AnalyzeRequest):
+async def analyze_place(request: schemas.AnalyzeRequest, db: Session = Depends(get_db)):
     """
-    使用 AI 生成地點介紹
+    使用 AI 生成地點介紹與正反點評 (包含 Cache 機制)
     """
-    description = await run_in_threadpool(nlp_service.generate_place_description, request.name, request.address)
-    return schemas.AnalyzeResponse(description=description)
+    # 1. Check Cache
+    cache_entry = db.query(AIAnalysisCache).filter(
+        AIAnalysisCache.place_name == request.name,
+        AIAnalysisCache.address == request.address
+    ).first()
+    
+    if cache_entry:
+        print(f"🚀 [Cache Hit] Using existing analysis for: {request.name}")
+        res = cache_entry.result
+        return schemas.AnalyzeResponse(
+            description=res.get("description", ""),
+            pro_comment=res.get("pro_comment", ""),
+            con_comment=res.get("con_comment", "")
+        )
+    
+    # 2. Call AI
+    print(f"🤖 [Cache Miss] Calling Gemini for: {request.name}")
+    result = await run_in_threadpool(nlp_service.generate_place_description, request.name, request.address)
+    
+    # 3. Save to Cache
+    new_cache = AIAnalysisCache(
+        place_name=request.name,
+        address=request.address,
+        result=result
+    )
+    db.add(new_cache)
+    db.commit()
+    
+    return schemas.AnalyzeResponse(
+        description=result.get("description", ""),
+        pro_comment=result.get("pro_comment", ""),
+        con_comment=result.get("con_comment", "")
+    )

@@ -40,8 +40,8 @@ class NLPService:
         1. **提取**：找出文中提到的所有「特定地點」、「店家」或「景點」(POIs)。
         2. **雙軌命名**：
            - `name`: **繁體中文顯示名**。若文中是簡稱，請校正為正式店名。若原文為英文且無通用中文譯名，則保留英文。
-           - `search_query`: **在地化外部搜尋字串**。這將用於 Google Maps API 搜尋。請包含「國家 + 城市 + 正式店名 + 當地原文店名」。
-        3. **推斷國家 (非常重要)**：若文中未直接說明國家，請務必根據「貨幣(如Won/KRW)」、「語言(如出現韓文)」、「地標」來強制推測。例如在韓國聖水洞的鹽麵包店，`search_query` 應為「Korea Seoul 자연도소금빵 성수」。
+           - `search_query`: **在地化外部搜尋字串**。這將用於 Google Maps API 搜尋。請務必包含「國家 + 城市 + 正式店名 + **當地原文店名(如果是韓國務必附上韓文)**」。
+        3. **推斷國家 (非常重要)**：若文中未直接說明國家，請務必根據「貨幣(如Won/KRW)」、「語言(如出現韓文)」、「地標」來強制推測。例如在韓國聖水洞的鹽麵包店，`search_query` 應為「South Korea Seoul 자연도소금빵 성수」。如果是日本，務必加上「Japan」。
         4. **校正與驗證**：利用你的知識庫驗證該地點是否存在。若該地點已歇業或明顯不存在，請忽略。
         
         請嚴格回傳一個 JSON Array，不要包含任何多餘的外掛文字或 Markdown：
@@ -87,31 +87,47 @@ class NLPService:
             print(f"NLP Extraction Error (Gemini): {e}")
             return []
 
-    def generate_place_description(self, name: str, address: Optional[str] = None) -> str:
+    def generate_place_description(self, name: str, address: Optional[str] = None) -> dict:
         """
-        使用 Google Gemini 生成景點的簡短介紹 (2-3 段)
+        使用 Google Gemini 生成景點的簡短介紹與模擬評價
         """
         if not self.model:
-            return f"{name} 是一個值得一探究竟的地點。"
+            return {
+                "description": f"{name} 是一個值得一探究竟的地點。",
+                "pro_comment": "拍照特別好出片！推薦！",
+                "con_comment": "週末人稍多，建議提早前往。"
+            }
 
         prompt = f"""
-        你是一位專業的旅遊導覽員。請為以下地點撰寫一段簡短且吸引人的介紹：
-        地點名稱：{name}
-        {f'地址：{address}' if address else ''}
+        請為「{name}」{f'(地址:{address})' if address else ''} 生成以下三個旅遊資訊：
+        1. description: 一段50字繁體中文的簡短旅遊介紹。要吸引人、包含特色。
+        2. pro_comment: 一句模擬網友的真實好評（20字內，針對該地點可能的優點）。
+        3. con_comment: 一句模擬網友的真實負評或避雷建議（20字內，針對該地點可能的缺點如人多、價格高）。
         
-        要求：
-        1. 使用繁體中文。
-        2. 分為 2 到 3 個短句或段落，總字數控制在 100 字以內。
-        3. 內容要包含該地點的特色、文化底蘊或必看之處。
-        4. 不要使用 Markdown 標題，直接輸出文字內容。
+        請直接回傳 JSON 格式，不要包含任何 Markdown 標記：
+        {{
+            "description": "...",
+            "pro_comment": "...",
+            "con_comment": "..."
+        }}
         """
 
         try:
             response = self.model.generate_content(prompt)
-            return response.text.strip()
+            text = response.text.replace('```json', '').replace('```', '').strip()
+            data = json.loads(text)
+            return {
+                "description": data.get("description", f"{name} 是當地熱門的地點之一。"),
+                "pro_comment": data.get("pro_comment", "值得一訪！"),
+                "con_comment": data.get("con_comment", "人潮稍多，建議平日前往。")
+            }
         except Exception as e:
             print(f"NLP Description Error (Gemini): {e}")
-            return f"{name} 提供了豐富的體驗與獨特的氛圍，是當地熱門的地點之一。"
+            return {
+                "description": f"{name} 提供了豐富的體驗。",
+                "pro_comment": "很棒的體驗！",
+                "con_comment": "這附近不好停車。"
+            }
 
     def _get_mock_extraction(self) -> List[Dict[str, Any]]:
         return [

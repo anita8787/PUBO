@@ -329,7 +329,7 @@ class ShareViewController: UIViewController {
     // Backend API Logic
     private func sendURLToPuboBackend(url: URL, completion: @escaping (String) -> Void) {
         // 使用 Vercel Production URL
-        guard let backendURL = URL(string: "https://pubo-pink.vercel.app/api/v1/share") else { return }
+        guard let backendURL = URL(string: "http://192.168.1.168:8000/api/v1/share") else { return }
         
         var request = URLRequest(url: backendURL)
         request.httpMethod = "POST"

@@ -6,8 +6,8 @@ struct FloatingTaskInbox: View {
     var onTap: () -> Void
     
     @State private var dragAmount: CGSize = .zero
-    @State private var position: CGSize = CGSize(width: UIScreen.main.bounds.width / 2 - 40, height: -100) // Default top right
-    @State private var rotationAngle: Double = 0.0
+    @State private var position: CGSize = CGSize(width: 150, height: -100) // Default top right
+    @State private var progress: CGFloat = 0.0
 
     var body: some View {
         Button(action: {
@@ -19,7 +19,7 @@ struct FloatingTaskInbox: View {
                 // Main Circle
                 ZStack {
                     Circle()
-                        .fill(Color(hex: "FDFAEE"))
+                        .fill(Color.white)
                         .frame(width: 56, height: 56)
                         .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
                         .overlay(Circle().stroke(Color.black.opacity(0.1), lineWidth: 1))
@@ -28,36 +28,41 @@ struct FloatingTaskInbox: View {
                     Image(systemName: "tray.fill")
                         .font(.system(size: 22, weight: .bold))
                         .foregroundColor(Color(hex: "023B7E")) // PuboColors.navy
+                        .overlay(
+                            // Red Dot Notification attached directly to the icon
+                            Group {
+                                if hasResult {
+                                    Circle()
+                                        .fill(Color.red)
+                                        .frame(width: 8, height: 8) // slightly smaller relative to the icon
+                                        .overlay(Circle().stroke(Color.white, lineWidth: 1.0))
+                                        .offset(x: 4, y: -4) // pull it closer
+                                }
+                            },
+                            alignment: .topTrailing
+                        )
                     
-                    // Progress Spinner Layer
+                    // Progress Spinner Layer -> Loading bar fill
                     if isProcessing {
                         Circle()
-                            .trim(from: 0.1, to: 0.9)
-                            .stroke(Color(hex: "FFC649"), style: StrokeStyle(lineWidth: 3, lineCap: .round)) // PuboColors.yellow
+                            .trim(from: 0.0, to: progress)
+                            .stroke(Color.blue, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                             .frame(width: 62, height: 62)
-                            .rotationEffect(Angle(degrees: rotationAngle))
+                            .rotationEffect(Angle(degrees: -90))
                             .onAppear {
-                                withAnimation(Animation.linear(duration: 1.5).repeatForever(autoreverses: false)) {
-                                    rotationAngle = 360.0
+                                progress = 0.0
+                                withAnimation(Animation.easeInOut(duration: 8.0)) {
+                                    progress = 0.95
                                 }
                             }
                     }
                     
-                    // Full Ring when done
+                    // Full Ring when done -> Red border
                     if hasResult {
                         Circle()
-                            .stroke(Color.green, lineWidth: 3)
+                            .stroke(Color.red, lineWidth: 3)
                             .frame(width: 62, height: 62)
                     }
-                }
-                
-                // Red Dot Notification
-                if hasResult {
-                    Circle()
-                        .fill(Color.red)
-                        .frame(width: 14, height: 14)
-                        .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
-                        .offset(x: 2, y: -2)
                 }
             }
         }
@@ -74,14 +79,22 @@ struct FloatingTaskInbox: View {
                         position.height += dragAmount.height
                         dragAmount = .zero
                         
-                        // Limit dragging within screen bounds
-                        let screenWidth = UIScreen.main.bounds.width
-                        let screenHeight = UIScreen.main.bounds.height
+                        // Limit dragging within screen bounds and snap to edges
+                        let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene
+                        let screenRect = windowScene?.screen.bounds ?? CGRect(x: 0, y: 0, width: 400, height: 800)
+                        let screenWidth = screenRect.width
+                        let screenHeight = screenRect.height
                         
-                        if position.width > screenWidth / 2 - 30 { position.width = screenWidth / 2 - 30 }
-                        if position.width < -screenWidth / 2 + 30 { position.width = -screenWidth / 2 + 30 }
-                        if position.height > screenHeight / 2 - 30 { position.height = screenHeight / 2 - 30 }
-                        if position.height < -screenHeight / 2 + 30 { position.height = -screenHeight / 2 + 30 }
+                        // Snap logic
+                        if position.width > 0 {
+                            position.width = screenWidth / 2 - 40 // Snap right
+                        } else {
+                            position.width = -screenWidth / 2 + 40 // Snap left
+                        }
+                        
+                        // Vertical constraint
+                        if position.height > screenHeight / 2 - 50 { position.height = screenHeight / 2 - 50 }
+                        if position.height < -screenHeight / 2 + 50 { position.height = -screenHeight / 2 + 50 }
                     }
                 }
         )

@@ -3,6 +3,7 @@ import Combine
 import SwiftUI
 import CoreLocation
 import MapKit
+import SwiftData
 
 @MainActor
 class TripManager: ObservableObject {
@@ -10,6 +11,10 @@ class TripManager: ObservableObject {
     @Published var days: [String: [ItineraryDay]] = [:] // Map tripId to days
     @Published var isLoading = false
     @Published var errorMessage: String?
+    @Published var focusPlaceFromLibrary: SDPlace? = nil
+    
+    // SwiftData Context (External injection)
+    var modelContext: ModelContext?
     
     // Backup for restoration
     private var originalSpotsOrder: [String: [String: [ItinerarySpot]]] = [:] // tripId -> dayId -> [Spots]
@@ -41,11 +46,75 @@ class TripManager: ObservableObject {
             }
             self.days = newDays
             print("TripManager: Fetched \(trips.count) trips")
+            
+            // Phase 17: Sync to SwiftData for Offline Use
+            await syncToSwiftData(fetchedTrips)
+            
         } catch {
-            print("TripManager Error: \(error)")
+            print("TripManager: Fetch failed: \(error)")
             self.errorMessage = error.localizedDescription
+            loadFromSwiftData() // Phase 17 Fallback
         }
         isLoading = false
+    }
+    
+    // Phase 17: Load from Local Storage
+    private func loadFromSwiftData() {
+        guard let context = modelContext else { return }
+        
+        print("💾 [SwiftData] Loading cached trips...")
+        let descriptor = FetchDescriptor<SDTrip>()
+        if let cachedTrips = try? context.fetch(descriptor) {
+            self.trips = cachedTrips.map { sdTrip in
+                // Convert SDTrip -> Trip (simplified for UI)
+                Trip(
+                    id: sdTrip.id,
+                    title: sdTrip.title,
+                    destination: sdTrip.destination,
+                    startDate: sdTrip.startDate,
+                    endDate: sdTrip.endDate,
+                    coverImageUrl: sdTrip.coverImageUrl,
+                    transportMode: sdTrip.transportMode,
+                    days: sdTrip.days.map { sdDay in
+                        ItineraryDay(
+                            id: sdDay.id,
+                            dayOrder: sdDay.dayOrder,
+                            date: sdDay.date,
+                            weekday: sdDay.weekday,
+                            title: sdDay.title,
+                            spots: sdDay.spots.map { sdSpot in
+                                ItinerarySpot(
+                                    id: sdSpot.id,
+                                    dayId: sdDay.id,
+                                    name: sdSpot.name,
+                                    category: SpotCategory(rawValue: sdSpot.category?.lowercased() ?? "spot") ?? .spot,
+                                    startTime: sdSpot.startTime,
+                                    stayDuration: sdSpot.stayDuration,
+                                    notes: sdSpot.notes,
+                                    imageUrl: sdSpot.imageUrl,
+                                    placeId: nil,
+                                    googlePlaceId: sdSpot.googlePlaceId,
+                                    latitude: sdSpot.latitude,
+                                    longitude: sdSpot.longitude,
+                                    sortOrder: sdSpot.sortOrder,
+                                    travelMode: TransportType(rawValue: sdSpot.travelMode?.lowercased() ?? "train") ?? .train,
+                                    travelTime: sdSpot.travelTime,
+                                    travelDistance: sdSpot.travelDistance
+                                )
+                            }
+                        )
+                    }
+                )
+            }
+            
+            // Sync days mapping
+            var newDaysMapping: [String: [ItineraryDay]] = [:]
+            for t in self.trips {
+                newDaysMapping[t.id] = t.days ?? []
+            }
+            self.days = newDaysMapping
+            print("✅ [SwiftData] Loaded \(trips.count) trips from cache")
+        }
     }
     
     // Gradient color sequence for trip cards (Client-side visual only)
@@ -677,49 +746,10 @@ class TripManager: ObservableObject {
                             let targetRegion = region(for: destination)
                             let results = try await resolver.resolvePOI(query: cleanQuery, region: targetRegion, countryName: destination)
                             
-                            // 🔍 Aggressive Filter: Pick results within a reasonable distance from destination center
-                            let validResults = results.filter { match in
-                                guard let target = targetRegion else { return true }
-                                let dist = CLLocation(latitude: match.latitude, longitude: match.longitude)
-                                    .distance(from: CLLocation(latitude: target.center.latitude, longitude: target.center.longitude))
-                                return dist < 500_000 // Increased to 500km to cover full North-South span
-                            }
+                            // Remove overly strict filtering and CLGeocoder (deprecated in iOS 26) since the user can import spots from any country.
+                            let strictlyValid = results
                             
-                            // Perform Reverse Geocoding to verify country
-                            let resultsWithCountry = await withTaskGroup(of: (Place, String?).self) { group in
-                                for item in validResults {
-                                    group.addTask {
-                                        let location = CLLocation(latitude: item.latitude, longitude: item.longitude)
-                                        do {
-                                            let placemarks = try await CLGeocoder().reverseGeocodeLocation(location)
-                                            return (item, placemarks.first?.isoCountryCode)
-                                        } catch {
-                                            return (item, nil)
-                                        }
-                                    }
-                                }
-                                var final: [(Place, String?)] = []
-                                for await res in group { final.append(res) }
-                                return final
-                            }
-
-                            // Filter by distance AND country code
-                            let isKoreaTrip = destination.lowercased().contains("韓國") || destination.lowercased().contains("korea")
-                            let strictlyValid = resultsWithCountry.filter { item, countryCode in
-                                guard let target = targetRegion else { return true }
-                                let dist = CLLocation(latitude: item.latitude, longitude: item.longitude)
-                                    .distance(from: CLLocation(latitude: target.center.latitude, longitude: target.center.longitude))
-                                
-                                // Hard rule: If trip is Korea, result MUST be KR
-                                if isKoreaTrip && countryCode != "KR" {
-                                    print("🚫 Rejected Match for \(spot.name): Wrong Country (\(countryCode ?? "Unknown") != KR)")
-                                    return false
-                                }
-                                
-                                return dist < 280_000 
-                            }
-
-                            if let (firstMatch, _) = strictlyValid.first {
+                            if let firstMatch = strictlyValid.first {
                                 guard let target = targetRegion else {
                                     print("⚠️ Cannot verify region for \(spot.name): targetRegion is nil.")
                                     // Proceed without region check if targetRegion is nil, or skip if strict
@@ -779,5 +809,102 @@ class TripManager: ObservableObject {
             )
         }
         return nil
+    }
+    
+    // MARK: - SwiftData Synchronization (Phase 17)
+    
+    @MainActor
+    private func syncToSwiftData(_ fetchedTrips: [Trip]) async {
+        guard let context = modelContext else {
+            print("⚠️ TripManager: Skip SwiftData sync (context not set)")
+            return
+        }
+        
+        print("💾 [SwiftData] Starting sync for \(fetchedTrips.count) trips...")
+        
+        for trip in fetchedTrips {
+            // Upsert Trip
+            let tripId = trip.id
+            let fetchDescriptor = FetchDescriptor<SDTrip>(predicate: #Predicate { $0.id == tripId })
+            
+            let existingTrip = try? context.fetch(fetchDescriptor).first
+            let sdTrip: SDTrip
+            
+            if let existing = existingTrip {
+                // Update basic fields
+                existing.title = trip.title
+                existing.destination = trip.destination
+                existing.startDate = trip.startDate
+                existing.endDate = trip.endDate
+                existing.coverImageUrl = trip.coverImageUrl
+                existing.transportMode = trip.transportMode
+                sdTrip = existing
+            } else {
+                // Create new
+                sdTrip = SDTrip(
+                    id: trip.id,
+                    title: trip.title,
+                    destination: trip.destination,
+                    startDate: trip.startDate,
+                    endDate: trip.endDate,
+                    coverImageUrl: trip.coverImageUrl,
+                    transportMode: trip.transportMode
+                )
+                context.insert(sdTrip)
+            }
+            
+            // Sync Days
+            if let days = trip.days {
+                syncDaysToSwiftData(days, parent: sdTrip, context: context)
+            }
+        }
+        
+        do {
+            try context.save()
+            print("✅ [SwiftData] Sync successful!")
+        } catch {
+            print("❌ [SwiftData] Save error: \(error)")
+        }
+    }
+    
+    private func syncDaysToSwiftData(_ days: [ItineraryDay], parent: SDTrip, context: ModelContext) {
+        // Simple approach: Clear and rebuild days/spots for that trip to ensure order/content sync
+        // In a real high-perf app, you'd diff them, but for itinerary data size, rebuilding is safer.
+        parent.days.forEach { context.delete($0) }
+        parent.days = []
+        
+        for dayData in days {
+            let sdDay = SDItineraryDay(
+                id: dayData.id,
+                dayOrder: dayData.dayOrder,
+                date: dayData.date,
+                weekday: dayData.weekday,
+                title: dayData.title
+            )
+            sdDay.trip = parent
+            context.insert(sdDay)
+            
+            // Sync Spots
+            for spotData in dayData.spots {
+                let sdSpot = SDItinerarySpot(
+                    id: spotData.id,
+                    name: spotData.name,
+                    category: spotData.category?.rawValue,
+                    startTime: spotData.startTime,
+                    stayDuration: spotData.stayDuration,
+                    notes: spotData.notes ?? [],
+                    imageUrl: spotData.imageUrl,
+                    googlePlaceId: spotData.googlePlaceId,
+                    latitude: spotData.latitude,
+                    longitude: spotData.longitude,
+                    sortOrder: spotData.sortOrder,
+                    travelMode: spotData.travelMode?.rawValue,
+                    travelTime: spotData.travelTime,
+                    travelDistance: spotData.travelDistance
+                )
+                sdSpot.day = sdDay
+                context.insert(sdSpot)
+            }
+        }
     }
 }

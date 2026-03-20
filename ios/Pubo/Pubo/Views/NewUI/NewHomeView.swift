@@ -77,7 +77,13 @@ struct NewHomeView: View {
         }
         .ignoresSafeArea(.keyboard) // 整個 ZStack 不跟隨鍵盤移動
         .ignoresSafeArea(.container, edges: .bottom)
-        // Removed Sheet
+        .environmentObject(tripManager)
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FocusMapOnPlace"))) { notif in
+            if let place = notif.object as? SDPlace {
+                self.activeTab = 0
+                tripManager.focusPlaceFromLibrary = place
+            }
+        }
     }
     
     // Extracted Home Content to keep body clean
@@ -114,7 +120,6 @@ struct NewHomeView: View {
                     Spacer()
                     
                     HStack(spacing: 12) {
-                        CircleButton(icon: "magnifyingglass")
                         CircleButton(icon: "person", action: { activeTab = 3 })
                     }
                 }
@@ -227,8 +232,21 @@ struct CircleButton: View {
 }
 
 struct BoardingPassView: View {
+    @AppStorage("bpFromCity") private var fromCity: String = "台北"
+    @AppStorage("bpFromCode") private var fromCode: String = "TAIPEI"
+    @AppStorage("bpToCity") private var toCity: String = "大阪"
+    @AppStorage("bpToCode") private var toCode: String = "OSAKA"
+    @AppStorage("bpFlightNumber") private var flightNumber: String = "BR719"
+    @AppStorage("bpDate") private var date: String = "02.20 THU"
+    @AppStorage("bpTime") private var time: String = "12:30 PM"
+    @AppStorage("bpSeat") private var seat: String = "12A"
+    @AppStorage("bpGate") private var gate: String = "B7"
+    
+    @State private var isEditing = false
+    
     var body: some View {
-        VStack(spacing: 0) {
+        Button(action: { isEditing = true }) {
+            VStack(spacing: 0) {
             // Header
             HStack {
                 Text("BOARDING PASS")
@@ -245,8 +263,8 @@ struct BoardingPassView: View {
             HStack(alignment: .center) {
                 VStack(alignment: .leading) {
                     Text("FROM").font(.system(size: 9, weight: .bold)).foregroundColor(PuboColors.navy)
-                    Text("台北").font(.system(size: 32, weight: .black)).foregroundColor(PuboColors.navy)
-                    Text("TAIPEI").font(.system(size: 11, weight: .medium))
+                    Text(fromCity).font(.system(size: 32, weight: .black)).foregroundColor(PuboColors.navy)
+                    Text(fromCode).font(.system(size: 11, weight: .medium))
                 }
                 
                 Spacer()
@@ -271,7 +289,7 @@ struct BoardingPassView: View {
                     }
                     
                     // Flight number below airplane
-                    Text("BR719")
+                    Text(flightNumber)
                         .font(.system(size: 9, weight: .bold))
                         .foregroundColor(PuboColors.navy.opacity(0.6))
                 }
@@ -281,8 +299,8 @@ struct BoardingPassView: View {
                 
                 VStack(alignment: .trailing) {
                     Text("TO").font(.system(size: 9, weight: .bold)).foregroundColor(PuboColors.navy)
-                    Text("大阪").font(.system(size: 32, weight: .black)).foregroundColor(PuboColors.navy)
-                    Text("OSAKA").font(.system(size: 11, weight: .medium))
+                    Text(toCity).font(.system(size: 32, weight: .black)).foregroundColor(PuboColors.navy)
+                    Text(toCode).font(.system(size: 11, weight: .medium))
                 }
             }
             .padding(24)
@@ -290,17 +308,17 @@ struct BoardingPassView: View {
             
             // Footer Info
             HStack {
-                VStack(alignment: .leading) { Text("DATE").font(.caption2).bold(); Text("02.20 THU").font(.caption) }
+                VStack(alignment: .leading) { Text("DATE").font(.caption2).bold(); Text(date).font(.caption) }
                 Spacer()
-                VStack(alignment: .leading) { Text("TIME").font(.caption2).bold(); Text("12:30 PM").font(.caption) }
+                VStack(alignment: .leading) { Text("TIME").font(.caption2).bold(); Text(time).font(.caption) }
                 Spacer()
-                VStack(alignment: .leading) { Text("SEAT").font(.caption2).bold(); Text("12A").font(.caption) }
+                VStack(alignment: .leading) { Text("SEAT").font(.caption2).bold(); Text(seat).font(.caption) }
                 Spacer()
-                VStack(alignment: .leading) { Text("GATE").font(.caption2).bold(); Text("B7").font(.caption) }
+                VStack(alignment: .leading) { Text("GATE").font(.caption2).bold(); Text(gate).font(.caption) }
             }
             .foregroundColor(PuboColors.navy)
             .padding(.horizontal, 24)
-            .padding(.vertical, 12)
+            .padding(.vertical, 16)
             .background(PuboColors.blue)
             .overlay(
                 Rectangle()
@@ -316,6 +334,51 @@ struct BoardingPassView: View {
                 .stroke(PuboColors.navy, lineWidth: 2.5)
         )
         .retroShadow(color: .black.opacity(0.1))
+        } // End of Button
+        .buttonStyle(.plain)
+        .sheet(isPresented: $isEditing) {
+            BoardingPassEditSheet()
+        }
+    }
+}
+
+struct BoardingPassEditSheet: View {
+    @AppStorage("bpFromCity") private var fromCity: String = "台北"
+    @AppStorage("bpFromCode") private var fromCode: String = "TAIPEI"
+    @AppStorage("bpToCity") private var toCity: String = "大阪"
+    @AppStorage("bpToCode") private var toCode: String = "OSAKA"
+    @AppStorage("bpFlightNumber") private var flightNumber: String = "BR719"
+    @AppStorage("bpDate") private var date: String = "02.20 THU"
+    @AppStorage("bpTime") private var time: String = "12:30 PM"
+    @AppStorage("bpSeat") private var seat: String = "12A"
+    @AppStorage("bpGate") private var gate: String = "B7"
+    
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        NavigationView {
+            Form {
+                Section(header: Text("從 / From")) {
+                    TextField("出發城市 (例如: 台北)", text: $fromCity)
+                    TextField("出發機場代碼 (例如: TPE)", text: $fromCode)
+                }
+                
+                Section(header: Text("目的地 / To")) {
+                    TextField("目的城市 (例如: 大阪)", text: $toCity)
+                    TextField("目的機場代碼 (例如: KIX)", text: $toCode)
+                }
+                
+                Section(header: Text("航班詳細資訊 / Flight Details")) {
+                    TextField("航班號碼 (Flight Number)", text: $flightNumber)
+                    TextField("日期 (Date)", text: $date)
+                    TextField("時間 (Time)", text: $time)
+                    TextField("座位 (Seat)", text: $seat)
+                    TextField("登機門 (Gate)", text: $gate)
+                }
+            }
+            .navigationTitle("編輯機票資訊")
+            .navigationBarItems(trailing: Button("完成") { dismiss() })
+        }
     }
 }
 
