@@ -31,6 +31,27 @@ def on_startup():
 def read_root():
     return {"message": "Welcome to Pubo API"}
 
+@app.get("/api/v1/debug/places")
+async def debug_places(query: str):
+    """Temporary endpoint to debug Vercel Google Places failures."""
+    try:
+        if not places_service.api_key:
+            return {"error": "API Key is missing"}
+            
+        url = f"{places_service.base_url}/places:searchText"
+        headers = {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": places_service.api_key,
+            "X-Goog-FieldMask": "places.name,places.id,places.formattedAddress,places.location,places.types,places.rating,places.userRatingCount,places.displayName,places.primaryType,places.currentOpeningHours,places.regularOpeningHours"
+        }
+        payload = {"textQuery": query, "maxResultCount": 1, "languageCode": "zh-TW"}
+        
+        import requests
+        response = requests.post(url, headers=headers, json=payload)
+        return {"status_code": response.status_code, "response": response.json(), "key_prefix": places_service.api_key[:5] if places_service.api_key else None}
+    except Exception as e:
+        return {"error": str(e)}
+
 async def process_share_task(task_id: str, url: str):
     """
     非同步處理函數：爬取內容並使用 LLM 解析
