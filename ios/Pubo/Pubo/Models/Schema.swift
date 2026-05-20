@@ -14,7 +14,10 @@ final class SDPlace {
     var openNow: Bool?
     var confidenceScore: Double
     var createdAt: Date
+    var updatedAt: Date = Date()
     var openingHours: String? // JSON String of OpenHours
+    var imageUrl: String?
+    var googlePlaceId: String?
     
     // Relationships
     @Relationship(deleteRule: .nullify, inverse: \SDContent.places)
@@ -32,7 +35,10 @@ final class SDPlace {
         openNow: Bool? = nil,
         confidenceScore: Double = 0.0,
         createdAt: Date = Date(),
-        openingHours: String? = nil
+        updatedAt: Date = Date(),
+        openingHours: String? = nil,
+        imageUrl: String? = nil,
+        googlePlaceId: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -45,7 +51,10 @@ final class SDPlace {
         self.openNow = openNow
         self.confidenceScore = confidenceScore
         self.createdAt = createdAt
+        self.updatedAt = updatedAt
         self.openingHours = openingHours
+        self.imageUrl = imageUrl
+        self.googlePlaceId = googlePlaceId
     }
 }
 
@@ -53,7 +62,7 @@ final class SDPlace {
 final class SDContent {
     @Attribute(.unique) var id: String
     var sourceType: String // "instagram", "threads"
-    var sourceUrl: String
+    var sourceUrl: String?
     var title: String?
     var text: String?
     var authorName: String?
@@ -77,7 +86,7 @@ final class SDContent {
     init(
         id: String = UUID().uuidString,
         sourceType: String,
-        sourceUrl: String,
+        sourceUrl: String? = nil,
         title: String? = nil,
         text: String? = nil,
         authorName: String? = nil,
@@ -118,9 +127,34 @@ final class SDTrip {
     @Relationship(deleteRule: .cascade, inverse: \SDItineraryDay.trip)
     var days: [SDItineraryDay] = []
     
-    var createdAt: Date = Date()
+    @Relationship(deleteRule: .cascade, inverse: \SDPackingItem.trip)
+    var packingItems: [SDPackingItem] = []
     
-    init(id: String, title: String, destination: String? = nil, startDate: Date? = nil, endDate: Date? = nil, coverImageUrl: String? = nil, transportMode: String? = nil) {
+    var createdAt: Date = Date()
+    var updatedAt: Date = Date()
+
+    // ── 協作欄位 ─────────────────────────────────────────────────
+    /// 同步比對用時間戳（每次本地修改後更新）
+    var lastUpdated: Date = Date()
+    /// 六位數邀請碼，同時作為 Firestore Document ID；nil 表示尚未啟用協作
+    var inviteCode: String? = nil
+    /// 已加入協作的使用者 UID 列表（含 owner）
+    var collaborators: [String] = []
+    // ──────────────────────────────────────────────────────────────
+    
+    init(
+        id: String,
+        title: String,
+        destination: String? = nil,
+        startDate: Date? = nil,
+        endDate: Date? = nil,
+        coverImageUrl: String? = nil,
+        transportMode: String? = nil,
+        updatedAt: Date = Date(),
+        lastUpdated: Date = Date(),
+        inviteCode: String? = nil,
+        collaborators: [String] = []
+    ) {
         self.id = id
         self.title = title
         self.destination = destination
@@ -128,6 +162,10 @@ final class SDTrip {
         self.endDate = endDate
         self.coverImageUrl = coverImageUrl
         self.transportMode = transportMode
+        self.updatedAt = updatedAt
+        self.lastUpdated = lastUpdated
+        self.inviteCode = inviteCode
+        self.collaborators = collaborators
     }
 }
 
@@ -187,5 +225,46 @@ final class SDItinerarySpot {
         self.travelMode = travelMode
         self.travelTime = travelTime
         self.travelDistance = travelDistance
+    }
+}
+
+@Model
+final class SDOfflineTask {
+    @Attribute(.unique) var id: String
+    var taskType: String // "link_import", "screenshot_upload"
+    var payload: String? // URL or path to cached image
+    var status: String // "pending", "processing", "completed", "failed"
+    var errorMessage: String?
+    var createdAt: Date
+    
+    init(
+        id: String = UUID().uuidString,
+        taskType: String,
+        payload: String? = nil,
+        status: String = "pending",
+        errorMessage: String? = nil,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.taskType = taskType
+        self.payload = payload
+        self.status = status
+        self.errorMessage = errorMessage
+        self.createdAt = createdAt
+    }
+}
+
+@Model
+final class SDPackingItem {
+    @Attribute(.unique) var id: String
+    var name: String
+    var isChecked: Bool
+    
+    var trip: SDTrip?
+    
+    init(id: String = UUID().uuidString, name: String, isChecked: Bool = false) {
+        self.id = id
+        self.name = name
+        self.isChecked = isChecked
     }
 }

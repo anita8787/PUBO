@@ -31,7 +31,7 @@ class PlacesService:
         }
 
         try:
-            response = requests.post(url, headers=headers, json=payload)
+            response = requests.post(url, headers=headers, json=payload, timeout=10.0)
             response.raise_for_status()
             data = response.json()
             

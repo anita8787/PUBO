@@ -82,10 +82,47 @@ def update_trip(trip_id: str, trip_update: schemas.TripUpdate, db: Session = Dep
     for key, value in update_data.items():
         setattr(db_trip, key, value)
     
+    # NEW: Sync days if dates changed
+    if "start_date" in update_data or "end_date" in update_data:
+        if db_trip.start_date and db_trip.end_date:
+            delta = db_trip.end_date - db_trip.start_date
+            new_days_count = delta.days + 1
+            
+            # Update existing days or add new ones
+            existing_days = db_trip.days
+            for i in range(max(new_days_count, len(existing_days))):
+                current_date = db_trip.start_date + timedelta(days=i)
+                weekday_map = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
+                weekday_str = weekday_map[current_date.weekday()]
+                
+                if i < len(existing_days):
+                    # Update existing day
+                    existing_days[i].date = current_date
+                    existing_days[i].weekday = weekday_str
+                    if not existing_days[i].title or existing_days[i].title.startswith("Day "):
+                        existing_days[i].title = f"Day {i + 1}"
+                elif i < new_days_count:
+                    # Add new day
+                    new_day = ItineraryDay(
+                        trip_id=db_trip.id,
+                        day_order=i + 1,
+                        date=current_date,
+                        weekday=weekday_str,
+                        title=f"Day {i + 1}"
+                    )
+                    db.add(new_day)
+            
+            # Remove extra days if the range shrank
+            if len(existing_days) > new_days_count:
+                for j in range(new_days_count, len(existing_days)):
+                    db.delete(existing_days[j])
+    
     db.add(db_trip)
     db.commit()
     db.refresh(db_trip)
-    return db_trip
+    
+    # Re-fetch with joined days to ensure response has updated day dates
+    return db.query(Trip).options(joinedload(Trip.days)).filter(Trip.id == trip_id).first()
 
 @router.delete("/trips/{trip_id}")
 def delete_trip(trip_id: str, db: Session = Depends(get_db)):
@@ -114,9 +151,11 @@ def add_spot(day_id: int, spot: schemas.SpotCreate, db: Session = Depends(get_db
         # Sanitize google_place_id: Treat empty string as None
         g_id = spot.google_place_id if spot.google_place_id and spot.google_place_id.strip() != "" else None
         
-        if not final_place_id and g_id:
+        if not final_place_id and (g_id or spot.place):
             # Try to find existing place by External ID
-            existing_place = db.query(Place).filter(Place.place_id == g_id).first()
+            existing_place = None
+            if g_id:
+                existing_place = db.query(Place).filter(Place.place_id == g_id).first()
             if existing_place:
                 final_place_id = existing_place.id
             elif spot.place:

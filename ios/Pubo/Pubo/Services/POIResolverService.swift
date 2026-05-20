@@ -35,8 +35,8 @@ class POIResolverService {
                 placeId: UUID().uuidString, // item.identifier is not a String in iOS 16+
                 name: item.name ?? "未知地點",
                 address: item.name, // Avoid 'placemark.title' deprecation
-                latitude: item.location.coordinate.latitude,
-                longitude: item.location.coordinate.longitude,
+                latitude: item.placemark.coordinate.latitude,
+                longitude: item.placemark.coordinate.longitude,
                 category: item.pointOfInterestCategory?.rawValue ?? "其他",
                 rating: nil,
                 userRatingCount: nil,

@@ -212,9 +212,14 @@ struct DraggableLibraryView: View {
             .onAppear {
                 offset = height - collapsedHeight
             }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("TriggerLibraryPullUp"))) { _ in
+                withAnimation(.spring(response: 0.6, dampingFraction: 0.72)) {
+                    offset = expandedOffset
+                }
+            }
             .sheet(item: $selectedContent) { content in
                 LibraryDetailView(content: content)
-                    .presentationDetents([.fraction(0.75), .large])
+                    .presentationDetents([.fraction(0.9), .large])
                     .presentationDragIndicator(.visible)
             }
             .alert("新增分類", isPresented: $showingAddCategoryAlert) {
@@ -307,14 +312,34 @@ struct LibraryCard: View {
         VStack(alignment: .leading, spacing: 8) {
             // Image Area
             ZStack(alignment: .topTrailing) {
-                AsyncImage(url: URL(string: content.previewThumbnailUrl ?? "")) { img in
-                    img.resizable()
-                        .aspectRatio(contentMode: .fill)
-                } placeholder: {
-                    Rectangle().fill(Color.gray.opacity(0.12))
+                Group {
+                    if let urlStr = content.previewThumbnailUrl, !urlStr.isEmpty {
+                        AsyncImage(url: URL(string: urlStr)) { img in
+                            img.resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(maxWidth: .infinity, minHeight: 200, maxHeight: 200)
+                                .clipped()
+                        } placeholder: {
+                            Rectangle().fill(Color.gray.opacity(0.12))
+                                .frame(maxWidth: .infinity, minHeight: 200, maxHeight: 200)
+                        }
+                    } else {
+                        // Fallback for Plain Text or missing image
+                        ZStack {
+                            Color(hex: "F9F9F9")
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(content.text ?? "筆記內容")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.gray.opacity(0.8))
+                                    .lineLimit(10)
+                                    .multilineTextAlignment(.leading)
+                                Spacer()
+                            }
+                            .padding(12)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 200, maxHeight: 200)
+                    }
                 }
-                .frame(width: 160, height: 200) // Fixed size approx
-                .clipped()
                 .cornerRadius(14)
                 
                 // Selection Mode Overlay / Button
@@ -339,11 +364,9 @@ struct LibraryCard: View {
                     .padding(8)
                 }
             }
-            .frame(height: 200)
             
             // Info Area
             VStack(alignment: .leading, spacing: 4) {
-                // Title
                 // Title
                 Text(content.displayTitle)
                     .font(.system(size: 12, weight: .bold))
@@ -378,6 +401,7 @@ struct LibraryCard: View {
                 }
             }
         }
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 }
 
@@ -412,9 +436,8 @@ extension SDContent {
         case "youtube": return Image("platform-youtube")
         case "instagram": return Image("platform-instagram")
         case "threads": return Image("platform-threads")
+        case "plain_text": return Image(systemName: "doc.text.fill")
         default: return Image(systemName: "link.circle.fill")
         }
     }
-    
-
 }

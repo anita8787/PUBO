@@ -18,8 +18,9 @@ struct LibraryDetailView: View {
 
                     // 1. Header Info (Restored)
                     HStack {
-                        Image(systemName: "star.fill")
-                            .foregroundColor(PuboColors.yellow)
+                        Image("Star icon ")
+                            .resizable()
+                            .frame(width: 20, height: 20)
                         Text("已收藏了\(content.places.count)個地點")
                             .font(.headline)
                             .foregroundColor(.black)
@@ -29,11 +30,29 @@ struct LibraryDetailView: View {
                     // 2. Main Post Card
                     HStack(alignment: .bottom, spacing: 16) {
                         // Left: Image
-                        AsyncImage(url: URL(string: content.previewThumbnailUrl ?? "")) { img in
-                            img.resizable()
-                                .aspectRatio(contentMode: .fill)
-                        } placeholder: {
-                            Rectangle().fill(Color.gray.opacity(0.12))
+                        Group {
+                            if let urlStr = content.previewThumbnailUrl, !urlStr.isEmpty {
+                                AsyncImage(url: URL(string: urlStr)) { img in
+                                    img.resizable()
+                                        .aspectRatio(contentMode: .fill)
+                                } placeholder: {
+                                    Rectangle().fill(Color.gray.opacity(0.12))
+                                }
+                            } else {
+                                // Fallback for Plain Text
+                                ZStack {
+                                    Color(hex: "F9F9F9")
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(content.text ?? "筆記內容")
+                                            .font(.system(size: 9))
+                                            .foregroundColor(.gray.opacity(0.6))
+                                            .lineLimit(8)
+                                            .multilineTextAlignment(.leading)
+                                        Spacer()
+                                    }
+                                    .padding(8)
+                                }
+                            }
                         }
                         .frame(width: 120, height: 160)
                         .clipped()
@@ -60,7 +79,7 @@ struct LibraryDetailView: View {
                             }
                             
                             // Platform & Share
-                            HStack {
+                            HStack(spacing: 6) {
                                 content.platformIcon
                                     .resizable()
                                     .scaledToFit()
@@ -70,14 +89,15 @@ struct LibraryDetailView: View {
                                     .font(.caption)
                                     .foregroundColor(.gray)
                                 
-                                Spacer()
-                                
-                                if let url = URL(string: content.sourceUrl) {
+                                if let sourceUrl = content.sourceUrl, let url = URL(string: sourceUrl) {
                                     ShareLink(item: url) {
                                         Image(systemName: "square.and.arrow.up")
+                                            .font(.system(size: 14, weight: .bold))
                                             .foregroundColor(.gray)
                                     }
                                 }
+                                
+                                Spacer()
                             }
                             
                             // Title

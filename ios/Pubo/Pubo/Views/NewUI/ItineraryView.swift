@@ -5,30 +5,29 @@ import SwiftData
 struct ItineraryView: View {
     @EnvironmentObject var tripManager: TripManager
     @Binding var isTabBarHidden: Bool
-    @State private var selectedTripId: String? = nil
     @State private var selectedDayIndex: Int = 0
     var onBack: () -> Void 
     var onAddClick: () -> Void 
     
     var body: some View {
         ZStack {
-            if let tripId = selectedTripId, let trip = tripManager.trips.first(where: { $0.id == tripId }) {
+            if let tripId = tripManager.selectedTripId, let trip = tripManager.trips.first(where: { $0.id == tripId }) {
                 // Single Trip Detail View
                 TripDetailView(
                     trip: trip,
                     selectedDayIndex: $selectedDayIndex,
                     isTabBarHidden: $isTabBarHidden,
-                    onBack: { selectedTripId = nil },
+                    onBack: { tripManager.selectedTripId = nil },
                     onAddClick: onAddClick
                 )
             } else {
                 // Trip List View
                 TripListView(tripManager: tripManager, onBack: onBack, onSelectTrip: { trip in
-                    selectedTripId = trip.id
+                    tripManager.selectedTripId = trip.id
                 })
             }
         }
-        .onChange(of: selectedTripId) { _, newValue in
+        .onChange(of: tripManager.selectedTripId) { _, newValue in
             // Reset day selection when switching trips to avoid index out of bounds
             if newValue != nil {
                 selectedDayIndex = 0
@@ -45,6 +44,9 @@ struct TripListView: View {
     let onSelectTrip: (Trip) -> Void
     @State private var isSorting = false
     @State private var showNewTripModal = false
+    @State private var showJoinTripSheet = false
+    @Environment(\.modelContext) private var context
+    @State private var joinErrorMessage: String? = nil
     
     var body: some View {
         ZStack {
@@ -55,30 +57,36 @@ struct TripListView: View {
                 HStack {
                     Button(action: onBack) { // Navigation Back
                         Image(systemName: "arrow.left")
-                            .font(.system(size: 20))
+                            .font(.system(size: 20, weight: .bold))
                             .foregroundColor(.black)
                             .frame(width: 44, height: 44)
                             .background(Color.white)
                             .clipShape(Circle())
                             .overlay(Circle().stroke(Color.black, lineWidth: 2))
-                            .retroShadow(color: .black.opacity(0.1))
+                            .retroShadow(color: .black.opacity(0.15), offset: 2.5)
                     }
                     
                     Spacer()
                     
                     HStack(spacing: 12) {
+
+
                         // Suitcase Button (New Trip)
                         Button(action: { showNewTripModal = true }) {
-                            Image(systemName: "briefcase")
-                                .font(.system(size: 20, weight: .bold))
-                                .foregroundColor(PuboColors.navy)
-                                .frame(width: 44, height: 44)
-                                .background(Color.white)
-                                .clipShape(Circle())
-                                .overlay(
-                                    Circle().stroke(PuboColors.navy, lineWidth: 2)
-                                )
-                                .retroShadow(color: PuboColors.navy.opacity(0.1))
+                            ZStack {
+                                Circle()
+                                    .fill(Color.white)
+                                    .frame(width: 44, height: 44)
+                                    .overlay(Circle().stroke(PuboColors.navy, lineWidth: 2))
+                                    .retroShadow(color: .black.opacity(0.1), offset: 2)
+                                
+                                Image("lugage")
+                                    .renderingMode(.original)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .padding(10)
+                                    .frame(width: 44, height: 44)
+                            }
                         }
                         
                         // Sort Button
@@ -105,8 +113,18 @@ struct TripListView: View {
                 if isSorting {
                     // Sortable List Mode
                     List {
-                        ForEach(tripManager.trips) { trip in
-                            TripCardView(title: trip.title, date: trip.date, spotsCount: trip.spots, color: trip.color.rawValue)
+                        ForEach(Array(tripManager.trips.enumerated()), id: \.element.id) { index, trip in
+                            TripCardView(
+                                title: trip.title,
+                                date: trip.date,
+                                spotsCount: trip.spots,
+                                color: TripManager.colorForIndex(index).rawValue,
+                                tripId: trip.id,
+                                inviteCode: trip.inviteCode,
+                                onShareTap: {
+                                    shareTrip(trip)
+                                }
+                            )
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(Color.clear)
                                 .padding(.bottom, 12)
@@ -127,23 +145,51 @@ struct TripListView: View {
                                 .padding(.horizontal, 24)
                                 .padding(.top, 24)
                             
-                            VStack(spacing: -45) { // Overlapping Cards — show title/date/spots
-                                ForEach(Array(tripManager.trips.enumerated()), id: \.element.id) { index, trip in
-                                    TripCardView(
-                                        title: trip.title,
-                                        date: trip.date,
-                                        spotsCount: trip.spots,
-                                        color: TripManager.colorForIndex(index).rawValue
-                                    )
-                                    .zIndex(Double(index))
-                                    .onTapGesture {
-                                        onSelectTrip(trip)
-                                    }
-                                    .contextMenu {
-                                        Button(role: .destructive) {
-                                            tripManager.deleteTrip(id: trip.id)
-                                        } label: {
-                                            Label("刪除行程", systemImage: "trash")
+                            if tripManager.trips.isEmpty {
+                                // Empty State
+                                VStack(spacing: 20) {
+                                    Image("lugage")
+                                        .renderingMode(.template)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 80, height: 80)
+                                        .foregroundColor(PuboColors.navy.opacity(0.1))
+                                    
+                                    Text("還沒有行程嗎？")
+                                        .font(.system(size: 16, weight: .bold))
+                                        .foregroundColor(PuboColors.navy.opacity(0.4))
+                                    
+                                    Text("點擊右上角的行李箱圖示\n開啟你的下一段冒險！")
+                                        .font(.system(size: 13))
+                                        .foregroundColor(PuboColors.navy.opacity(0.3))
+                                        .multilineTextAlignment(.center)
+                                        .lineSpacing(4)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 60)
+                            } else {
+                                VStack(spacing: -45) { // Overlapping Cards
+                                    ForEach(Array(tripManager.trips.enumerated()), id: \.element.id) { index, trip in
+                                        TripCardView(
+                                            title: trip.title,
+                                            date: trip.date,
+                                            spotsCount: trip.spots,
+                                            color: TripManager.colorForIndex(index).rawValue,
+                                            tripId: trip.id,
+                                            onShareTap: {
+                                                shareTrip(trip)
+                                            }
+                                        )
+                                        .zIndex(Double(index))
+                                        .onTapGesture {
+                                            onSelectTrip(trip)
+                                        }
+                                        .contextMenu {
+                                            Button(role: .destructive) {
+                                                tripManager.deleteTrip(id: trip.id)
+                                            } label: {
+                                                Label("刪除行程", systemImage: "trash")
+                                            }
                                         }
                                     }
                                 }
@@ -160,7 +206,8 @@ struct TripListView: View {
                         .padding()
                 }
             }
-            .background(Color.white) // Ensure solid background to prevent overlap
+            .background(Color.white)
+            .animation(nil, value: showNewTripModal) // Fix: Prevent zooming when modal opens/closes
             
             Group {
                 if showNewTripModal {
@@ -168,6 +215,9 @@ struct TripListView: View {
                         isPresented: $showNewTripModal,
                         onCreateTrip: { title, destination, start, end in
                             tripManager.addTrip(title: title, destination: destination, startDate: start, endDate: end)
+                        },
+                        onJoinClick: {
+                            showJoinTripSheet = true
                         }
                     )
                     .transition(.opacity)
@@ -175,8 +225,68 @@ struct TripListView: View {
             }
             .animation(.easeInOut, value: showNewTripModal)
             .zIndex(100)
+            
+            // Show error message if join fails
+            if let errorMsg = joinErrorMessage {
+                VStack {
+                    Spacer()
+                    Text(errorMsg)
+                        .font(.system(size: 14))
+                        .foregroundColor(.white)
+                        .padding()
+                        .background(Color.red.opacity(0.8))
+                        .cornerRadius(10)
+                        .padding(.bottom, 50)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .animation(.easeInOut, value: joinErrorMessage != nil)
+                .onAppear {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                        joinErrorMessage = nil
+                    }
+                }
+                .zIndex(200)
+            }
         }
         .ignoresSafeArea(.keyboard, edges: .bottom) // Prevent background cards from squishing/scaling via keyboard avoidance
+        .sheet(isPresented: $showJoinTripSheet) {
+            CollaborateSheet(isPresented: $showJoinTripSheet, trip: nil)
+        }
+    }
+    
+    private func joinTrip(inviteCode: String) {
+        Task {
+            do {
+                let fsTrip = try await FirestoreService.shared.joinTrip(inviteCode: inviteCode)
+                let newSDTrip = fsTrip.toSDTrip(inviteCode: inviteCode)
+                context.insert(newSDTrip)
+                let uid = AuthManager.shared.currentUID
+                if !newSDTrip.collaborators.contains(uid) {
+                    newSDTrip.collaborators.append(uid)
+                    try await FirestoreService.shared.addCollaborator(inviteCode: inviteCode, uid: uid)
+                }
+                try? context.save()
+                
+                await MainActor.run {
+                    tripManager.trips.append(newSDTrip.toTrip())
+                }
+            } catch {
+                await MainActor.run {
+                    joinErrorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+    
+    private func shareTrip(_ trip: Trip) {
+        let inviteCode = trip.inviteCode ?? ""
+        let text = "快來和我一起在 Pubo 規劃「\(trip.title)」！\n使用 Pubo App 輸入邀請碼加入：\(inviteCode)"
+        let av = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+        
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = windowScene.windows.first?.rootViewController {
+            rootVC.present(av, animated: true)
+        }
     }
 }
 
@@ -188,11 +298,15 @@ struct TripDetailView: View {
     let onBack: () -> Void
     let onAddClick: () -> Void
     
-    @State private var isMapMode = false // Toggle between List and Map
+    @State private var isMapMode = false
     @State private var showShareModal = false
     @State private var showSettingsModal = false
     @State private var showRestoreSortAlert = false
-    
+    @State private var showCollaborateSheet = false  // 協作 Sheet
+
+    // 同步管理
+    @StateObject private var syncManager = TripSyncManager.shared
+    @Environment(\.modelContext) private var modelContext
     // Sort Button Label Helper
     private var sortButtonLabel: String {
         if isSorting { return "完成" }
@@ -213,11 +327,13 @@ struct TripDetailView: View {
     @State private var showKoreaMapOptions = false // Toggle for KR action sheet
 
     @State private var isAddingSpotSheet = false // New Dashboard Sheet state
+    @State private var activeTransportPickerSpotId: String? = nil
 
     // New Action States
     @State private var moveSpotItem: ItinerarySpot? = nil
     @State private var replaceSpotItem: ItinerarySpot? = nil
     @State private var newSpotName = ""
+    @State private var showNotesJumpAlert = false
     var itineraryDays: [ItineraryDay] {
         tripManager.days[trip.id] ?? []
     }
@@ -254,6 +370,7 @@ struct TripDetailView: View {
                     onAddClick: { isAddingSpotSheet = true },
                     onShareClick: { withAnimation { showShareModal = true } }
                 )
+                .id(trip.id) // Stabilize identity to prevent @State resets
                     .transition(.opacity)
                     .onAppear { isTabBarHidden = true } // 確保進入地圖時隱藏
             } else {
@@ -278,6 +395,7 @@ struct TripDetailView: View {
             if showShareModal {
                 ShareTripModal(
                     isPresented: $showShareModal,
+                    trip: trip,
                     onGenerateImage: {
                         withAnimation { showShareModal = false }
                         // Delay slightly to allow modal to close smoothly
@@ -287,7 +405,7 @@ struct TripDetailView: View {
                     },
                     onCollaborate: {
                         withAnimation { showShareModal = false }
-                        // TODO: Handle collaboration
+                        showCollaborateSheet = true
                     }
                 )
                     .zIndex(100)
@@ -328,11 +446,24 @@ struct TripDetailView: View {
         .sheet(isPresented: $showSettingsModal) {
             TripSettingsView(tripId: trip.id)
         }
+        // 協作共同編輯 Sheet
+        .sheet(isPresented: $showCollaborateSheet) {
+            let sdTrips = (try? modelContext.fetch(FetchDescriptor<SDTrip>())) ?? []
+            if let sdTrip = sdTrips.first(where: { $0.id == trip.id }) {
+                CollaborateSheet(isPresented: $showCollaborateSheet, trip: sdTrip)
+            }
+        }
         .background(Color.white)
         .onAppear {
-            isTabBarHidden = true // 進入此視圖一律隱藏 TabBar
-            // 自動掃描並修復失效的座標 (0,0)
+            isTabBarHidden = true
             tripManager.resolveInvalidCoordinates(in: trip.id)
+            // 接入協作圖程：進入頁面時自動同步
+            Task {
+                let sdTrips = (try? modelContext.fetch(FetchDescriptor<SDTrip>())) ?? []
+                if let sdTrip = sdTrips.first(where: { $0.id == trip.id }) {
+                    await syncManager.syncOnAppear(trip: sdTrip, context: modelContext)
+                }
+            }
         }
         .onDisappear {
             isTabBarHidden = false
@@ -365,19 +496,6 @@ struct TripDetailView: View {
             }
             .presentationDetents([.medium, .large])
             .presentationBackground(.white)
-        }
-        .confirmationDialog("行程過長，請選擇導航段落", isPresented: $showNavigationSheet, titleVisibility: .visible) {
-            Button("導航上半場 (起點 - 中間點)") {
-                if let url = navigationPart1URL {
-                    UIApplication.shared.open(url)
-                }
-            }
-            Button("導航下半場 (中間點 - 終點)") {
-                if let url = navigationPart2URL {
-                    UIApplication.shared.open(url)
-                }
-            }
-            Button("取消", role: .cancel) {}
         }
     }
 
@@ -419,9 +537,9 @@ struct TripDetailView: View {
             HStack {
                 Button(action: onBack) {
                     Image(systemName: "arrow.left")
-                        .font(.system(size: 22))
+                        .font(.system(size: 20, weight: .bold))
                         .foregroundColor(.black)
-                        .frame(width: 40, height: 40)
+                        .frame(width: 44, height: 44)
                         .background(Color.white)
                         .clipShape(Circle())
                         .overlay(Circle().stroke(Color.black, lineWidth: 2))
@@ -429,21 +547,31 @@ struct TripDetailView: View {
                 }
                 Spacer()
                 HStack(spacing: 12) {
-                    Button(action: handleNavigation) {
+                    Button(action: handleNotesExport) {
                         Image(systemName: "paperplane.fill")
-                            .font(.system(size: 18))
+                            .font(.system(size: 20))
                             .foregroundColor(.black)
-                            .frame(width: 40, height: 40)
+                            .frame(width: 44, height: 44)
                             .background(Color.white)
                             .clipShape(Circle())
                             .overlay(Circle().stroke(Color.black, lineWidth: 2))
                             .retroShadow(color: .black.opacity(0.15), offset: 2.5)
                     }
+                    .alert("行程已複製", isPresented: $showNotesJumpAlert) {
+                        Button("前往備忘錄") {
+                            if let url = URL(string: "mobilenotes://") {
+                                UIApplication.shared.open(url)
+                            }
+                        }
+                        Button("取消", role: .cancel) {}
+                    } message: {
+                        Text("請在備忘錄中新增筆記，並長按「貼上」，即可帶入完美的排版與隱藏式超連結！")
+                    }
                     Button(action: { withAnimation { showShareModal = true } }) {
                         Image(systemName: "square.and.arrow.up")
-                            .font(.system(size: 18))
+                            .font(.system(size: 20))
                             .foregroundColor(.black)
-                            .frame(width: 40, height: 40)
+                            .frame(width: 44, height: 44)
                             .background(Color.white)
                             .clipShape(Circle())
                             .overlay(Circle().stroke(Color.black, lineWidth: 2))
@@ -452,9 +580,9 @@ struct TripDetailView: View {
                     
                     Button(action: { showSettingsModal = true }) {
                         Image(systemName: "gearshape.fill")
-                            .font(.system(size: 18))
+                            .font(.system(size: 20))
                             .foregroundColor(.black)
-                            .frame(width: 40, height: 40)
+                            .frame(width: 44, height: 44)
                             .background(Color.white)
                             .clipShape(Circle())
                             .overlay(Circle().stroke(Color.black, lineWidth: 2))
@@ -468,14 +596,25 @@ struct TripDetailView: View {
 
             // Trip Title & Date
             VStack(alignment: .leading, spacing: 8) {
-                Text(verbatim: trip.title)
-                    .font(.system(size: 34, weight: .black))
-                    .foregroundColor(PuboColors.navy)
-                    .tracking(-1)
+                let currentTrip = tripManager.trips.first(where: { $0.id == trip.id }) ?? trip
+                
+                // 標題 + 同步狀態指示器
+                HStack(alignment: .center, spacing: 8) {
+                    Text(verbatim: currentTrip.title)
+                        .font(.system(size: 34, weight: .black))
+                        .foregroundColor(PuboColors.navy)
+                        .tracking(-1)
+                    
+                    // 僅在有協作者時顯示同步狀態
+                    let sdTrips = (try? modelContext.fetch(FetchDescriptor<SDTrip>())) ?? []
+                    if let sdTrip = sdTrips.first(where: { $0.id == trip.id }),
+                       sdTrip.inviteCode != nil {
+                        SyncStatusBadge(status: syncManager.syncStatus)
+                    }
+                }
 
                 Button(action: { showCalendarModal = true }) {
                     HStack(spacing: 6) {
-                        let currentTrip = tripManager.trips.first(where: { $0.id == trip.id }) ?? trip
                         Text(verbatim: currentTrip.date.isEmpty ? "請選擇日期" : currentTrip.date)
                             .font(.system(size: 14, weight: .bold))
                             .foregroundColor(PuboColors.navy.opacity(0.6))
@@ -504,7 +643,7 @@ struct TripDetailView: View {
                             VStack(spacing: 2) {
                                 Text("DAY")
                                     .font(.system(size: 7, weight: .black))
-                                Text(verbatim: "\((dates.indices.contains(index) ? dates[index].split(separator: "/").last.map(String.init) : "") ?? "")")
+                                Text(verbatim: dates.indices.contains(index) ? String(dates[index].split(separator: "/").last ?? "") : "")
                                     .font(.system(size: 14, weight: .black))
                             }
                             .frame(width: 38, height: 52)
@@ -537,7 +676,7 @@ struct TripDetailView: View {
                  VStack(alignment: .leading, spacing: 0) {
                      // Day Header
                      if dates.indices.contains(selectedDayIndex) {
-                         HStack(alignment: .top) {
+                         HStack(alignment: .lastTextBaseline) {
                              VStack(alignment: .leading, spacing: 4) {
                                  Text(verbatim: "Day \(selectedDayIndex + 1)")
                                      .font(.system(size: 10, weight: .black))
@@ -618,7 +757,9 @@ struct TripDetailView: View {
                               // 2. Regular Spots
                               ForEach(Array(regularSpots.enumerated()), id: \.element.id) { index, spot in
                                   TimelineSpotView(
-                                      spot: spot,
+                                      spotId: spot.id,
+                                      tripId: trip.id,
+                                      dayIndex: selectedDayIndex,
                                       isLast: index == regularSpots.count - 1,
                                       index: index,
                                       onEdit: {
@@ -636,15 +777,18 @@ struct TripDetailView: View {
                                       onTransportChange: { newType in
                                           tripManager.updateSpotTransport(tripId: trip.id, dayIndex: selectedDayIndex, spotId: spot.id, transportType: newType)
                                       },
-                                      dayDate: itineraryDays[selectedDayIndex].date
+                                      dayDate: itineraryDays[selectedDayIndex].date,
+                                      activeTransportPickerSpotId: $activeTransportPickerSpotId,
+                                      fallbackImageUrl: trip.coverImageUrl
                                   )
                               }
+
                               
                                // Add Spot Button
                               addSpotButton
                           }
                           .padding(.bottom, 100)
-                          .id("trip-\(trip.id)-day-\(selectedDayIndex)-\(currentDaySpots.count)-\(currentDaySpots.map { "\($0.travelMode?.rawValue ?? "")-\($0.travelTime ?? "")-\($0.travelDistance ?? "")" }.joined())") // Force re-render on any relevant change
+                          .id("trip-\(trip.id)-day-\(selectedDayIndex)-\(currentDaySpots.count)-\(currentDaySpots.map { "\($0.travelMode?.rawValue ?? "none")-\($0.travelTime ?? "")-\($0.travelDistance ?? "")-\($0.imageUrl ?? "")" }.joined())") // Force re-render on any relevant change
                       }
                 }
             }
@@ -763,17 +907,6 @@ struct TripDetailView: View {
                 .padding(.bottom, 80)
             } // End VStack (Floating)
         } // End ZStack (planningView)
-        .confirmationDialog("選擇導航地圖", isPresented: $showKoreaMapOptions, titleVisibility: .visible) {
-            Button("Naver Map") {
-                launchNaverMap(spots: currentDaySpots.filter { $0.category != .accommodation })
-            }
-            Button("Google Maps") {
-                launchGoogleMaps(spots: currentDaySpots.filter { $0.category != .accommodation }, forceTransit: true)
-            }
-            Button("取消", role: .cancel) { }
-        } message: {
-            Text("部分韓國景點在 Google Maps 上的路線與位置可能不夠精確。")
-        }
     }
     // MARK: - Navigation Logic
     
@@ -785,105 +918,29 @@ struct TripDetailView: View {
         }
     }
     
-    func handleNavigation() {
-        // 1. Get ONLY current day's spots for sharing
+    func handleNotesExport() {
+        // 取得整趟旅程的所有景點，或者目前這天的景點。
+        // 這裡我們取 currentDaySpots 作為匯出的內容
         let spots = currentDaySpots.filter { $0.category != .accommodation }
-        guard spots.count >= 2 else {
-            print("⚠️ handleNavigation: Not enough spots for current day.")
-            return 
-        }
+        guard !spots.isEmpty else { return }
         
-        // 2. Intercept for Korea Routing
-        if isSouthKorea {
-            showKoreaMapOptions = true
-        } else {
-            launchGoogleMaps(spots: spots)
-        }
-    }
-    
-    func launchGoogleMaps(spots: [ItinerarySpot], forceTransit: Bool = false) {
-        let mode = forceTransit ? .train : getDominantTransportMode(for: spots)
+        // 複製到剪貼簿 (支援富文本)
+        PuboTextPackager.copyNotesToPasteboard(
+            tripTitle: trip.title, 
+            spots: spots
+        )
         
-        if spots.count > 10 {
-            let mid = spots.count / 2
-            let part1 = Array(spots[0...mid])
-            // Start Part 2 from the last point of Part 1 to ensure continuity
-            let part2 = Array(spots[mid...])
-            
-            navigationPart1URL = generateGoogleMapsUrl(spots: part1, mode: mode)
-            navigationPart2URL = generateGoogleMapsUrl(spots: part2, mode: mode)
-            showNavigationSheet = true
-        } else {
-            if let url = generateGoogleMapsUrl(spots: spots, mode: mode) {
-                print("🚀 Launching Google Maps: \(url)")
-                UIApplication.shared.open(url)
-            }
-        }
-    }
-    
-    func launchNaverMap(spots: [ItinerarySpot]) {
-        guard let first = spots.first, let last = spots.last else { return }
-        let originName = first.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let destName = last.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        
-        let urlStr = "nmap://route/public?slat=\(first.latitude ?? 0)&slng=\(first.longitude ?? 0)&sname=\(originName)&dlat=\(last.latitude ?? 0)&dlng=\(last.longitude ?? 0)&dname=\(destName)&appname=Pubo"
-        
-        if let url = URL(string: urlStr) {
-            UIApplication.shared.open(url, options: [:]) { success in
-                if !success { // Fallback if app is not installed
-                    if let store = URL(string: "https://apps.apple.com/app/id311867728") {
-                        UIApplication.shared.open(store)
-                    }
-                }
-            }
-        }
-    }
-    
-    func generateGoogleMapsUrl(spots: [ItinerarySpot], mode: TransportType) -> URL? {
-        guard spots.count >= 2 else { return nil }
-        
-        var components = URLComponents(string: "https://www.google.com/maps/dir/")!
-        components.queryItems = [URLQueryItem(name: "api", value: "1")]
-        
-        // Origin
-        if let origin = spots.first {
-            components.queryItems?.append(URLQueryItem(name: "origin", value: formatLocation(origin)))
-        }
-        
-        // Destination
-        if let dest = spots.last {
-            components.queryItems?.append(URLQueryItem(name: "destination", value: formatLocation(dest)))
-        }
-        
-        // Waypoints
-        if spots.count > 2 {
-            let waypoints = spots[1..<spots.count-1].map { formatLocation($0) }.joined(separator: "|")
-            components.queryItems?.append(URLQueryItem(name: "waypoints", value: waypoints))
-        }
-        
-        // Mode
-        let googleMode: String
-        switch mode {
-        case .car: googleMode = "driving"
-        case .walk: googleMode = "walking"
-        case .train, .bus: googleMode = "transit"
-        }
-        components.queryItems?.append(URLQueryItem(name: "travelmode", value: googleMode))
-        
-        return components.url
+        self.showNotesJumpAlert = true
     }
     
     func formatLocation(_ spot: ItinerarySpot) -> String {
-        // Priority: Name > Coordinate
-        if !spot.name.isEmpty {
-            return spot.name
-        }
+        // Fallback: 名稱優先，讓 Google Maps 顯示名稱
+        if !spot.name.isEmpty { return spot.name }
         
-        // Fallback to coordinate
-        if let lat = spot.latitude, let lon = spot.longitude {
-            if lat != 0.0 && lon != 0.0 {
-                return "\(lat),\(lon)"
-            }
+        // 如果沒有名稱，才用座標
+        if let lat = spot.latitude, let lon = spot.longitude,
+           lat != 0.0 && lon != 0.0 {
+            return "\(lat),\(lon)"
         }
         return ""
     }
@@ -910,7 +967,9 @@ struct TripDetailView: View {
 // MARK: - Reconstructed Subviews
 
 struct TimelineSpotView: View {
-    let spot: ItinerarySpot
+    let spotId: String        // Used to look up live data
+    let tripId: String
+    let dayIndex: Int
     let isLast: Bool
     let index: Int
     var onEdit: () -> Void
@@ -918,15 +977,32 @@ struct TimelineSpotView: View {
     var onReplace: () -> Void
     var onDelete: () -> Void
     var onTransportChange: ((TransportType) -> Void)?
-    var dayDate: Date? // Passed from parent
+    var dayDate: Date?
     
-    @State private var showTransportPicker = false
+    @EnvironmentObject var tripManager: TripManager
+    @Binding var activeTransportPickerSpotId: String?
+    var fallbackImageUrl: String? = nil
+    
     @State private var offset: CGFloat = 0
     @State private var showDeleteConfirmation = false
     
-
+    // Always read the LATEST spot from tripManager so travelMode updates reflect immediately
+    private var spot: ItinerarySpot? {
+        guard let dayList = tripManager.days[tripId], dayIndex < dayList.count else { return nil }
+        return dayList[dayIndex].spots.first(where: { $0.id == spotId })
+    }
+    
+    private var isPickerOpen: Bool {
+        activeTransportPickerSpotId == spotId
+    }
     
     var body: some View {
+        guard let spot = spot else { return AnyView(EmptyView()) }
+        return AnyView(spotContent(spot: spot))
+    }
+    
+    @ViewBuilder
+    func spotContent(spot: ItinerarySpot) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             // 1. MAIN CARD (Full Width)
             // 1. MAIN CARD (Full Width) with Swipe to Delete
@@ -952,7 +1028,8 @@ struct TimelineSpotView: View {
                     onMove: onMove,
                     onReplace: onReplace,
                     onDelete: onDelete,
-                    dayDate: dayDate
+                    dayDate: dayDate,
+                    fallbackImageUrl: fallbackImageUrl
                 )
                 .padding(.horizontal, 24)
                 // .background(Color.white) // Removed to prevent white corners
@@ -1055,7 +1132,11 @@ struct TimelineSpotView: View {
                             Button(action: {
                                 print("Transport button tapped for spot: \(spot.name)")
                                 withAnimation(.spring(response: 0.3)) {
-                                    showTransportPicker.toggle()
+                                    if activeTransportPickerSpotId == spot.id {
+                                        activeTransportPickerSpotId = nil
+                                    } else {
+                                        activeTransportPickerSpotId = spot.id
+                                    }
                                 }
                             }) {
                                 HStack(spacing: 8) {
@@ -1063,14 +1144,17 @@ struct TimelineSpotView: View {
                                     let transportType = info?.type ?? .train
                                     let transportTime = info?.time ?? "--"
                                     let transportDistance = info?.distance ?? "--"
+                                    let isPickerOpenNow = (activeTransportPickerSpotId == spot.id)
+                                    let isSelected = spot.travelMode != nil || isPickerOpenNow
                                     
                                     Image(systemName: transportIcon(for: transportType))
                                         .font(.system(size: 14))
-                                        .foregroundColor(info != nil ? PuboColors.navy : .gray.opacity(0.4))
+                                        .foregroundColor(isSelected ? PuboColors.navy : .gray.opacity(0.35))
                                         .frame(width: 32, height: 32)
                                         .background(Color.white)
                                         .clipShape(Circle())
-                                        .shadow(color: .black.opacity(0.1), radius: 3)
+                                        .overlay(Circle().stroke(isSelected ? PuboColors.navy : Color.clear, lineWidth: isSelected ? 2.0 : 0))
+                                        .shadow(color: .black.opacity(isSelected ? 0.0 : 0.08), radius: 3)
                                     
                                     Text("\(transportTime) • \(transportDistance)")
                                         .font(.system(size: 12, weight: .black))
@@ -1082,10 +1166,12 @@ struct TimelineSpotView: View {
                             }
                             .buttonStyle(PlainButtonStyle())
                             
-                            if showTransportPicker {
-                                TransportPicker(currentType: spot.travelToNext?.type ?? .train) { newType in
+                            if isPickerOpen {
+                                TransportPicker(currentType: spot.travelMode ?? .train) { newType in
                                     onTransportChange?(newType)
-                                    withAnimation { showTransportPicker = false }
+                                    withAnimation(.spring(response: 0.3)) {
+                                        activeTransportPickerSpotId = nil
+                                    }
                                 }
                                 .padding(.leading, 32)
                                 .transition(.scale(scale: 0.8).combined(with: .opacity))
@@ -1141,6 +1227,7 @@ struct SpotCardView: View {
     var onDelete: () -> Void
     var dayDate: Date? // Passed from parent
     var fallbackImageUrl: String? = nil // From Trip.coverImageUrl
+    var isConcise: Bool = false
     
     // Computed Business Status
     var businessStatus: BusinessStatusResult? {
@@ -1156,37 +1243,58 @@ struct SpotCardView: View {
             HStack(alignment: .center, spacing: -20) { // Overlap
                 // Left: Image Area with Index Badge
                 ZStack(alignment: .topLeading) {
-                    // Image Logic: Backend > OTM > Placeholder
-                    if let imageUrl = spot.imageUrl, !imageUrl.isEmpty, let url = URL(string: imageUrl) {
-                        // 1. Backend Image
-                        AsyncImage(url: url) { image in
-                            image.resizable().aspectRatio(contentMode: .fill)
-                        } placeholder: {
-                            defaultImagePlaceholder
+                    // Image Logic: 優先顯示社群封面圖 > OTM > Placeholder
+                    if let imageUrl = spot.imageUrl, !imageUrl.isEmpty {
+                        AsyncImage(url: URL(string: imageUrl)) { phase in
+                            switch phase {
+                            case .success(let image):
+                                image.resizable().aspectRatio(contentMode: .fill)
+                            case .failure:
+                                // 圖片失敗時，嘗試顯示行程封面圖
+                                if let fallback = fallbackImageUrl, let url = URL(string: fallback) {
+                                    AsyncImage(url: url) { image in
+                                        image.resizable().aspectRatio(contentMode: .fill)
+                                    } placeholder: {
+                                        defaultImagePlaceholder
+                                    }
+                                } else {
+                                    defaultImagePlaceholder
+                                }
+                            case .empty:
+                                // 正在載入中，顯示淡灰色佔位，不顯示轉圈圈
+                                Color.gray.opacity(0.08)
+                                    .overlay(
+                                        Image(systemName: "photo")
+                                            .font(.system(size: 24))
+                                            .foregroundColor(.gray.opacity(0.3))
+                                    )
+                            @unknown default:
+                                defaultImagePlaceholder
+                            }
                         }
                         .frame(width: 115, height: 115)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
-                    } else if let fallback = fallbackImageUrl, let url = URL(string: fallback) {
-                         // 2. Fallback (Trip Image)
-                         AsyncImage(url: url) { image in
-                             image.resizable().aspectRatio(contentMode: .fill)
-                         } placeholder: {
-                             defaultImagePlaceholder
-                         }
-                         .frame(width: 115, height: 115)
-                         .clipShape(RoundedRectangle(cornerRadius: 12))
-                    } else if let otmString = otmImageUrl, let url = URL(string: otmString) {
+                    } else if let otmString = otmImageUrl, !otmString.isEmpty, let url = URL(string: otmString) {
                          // 2. OTM Image
                          AsyncImage(url: url) { image in
                              image.resizable().aspectRatio(contentMode: .fill)
                          } placeholder: {
-                             defaultImagePlaceholder
+                            ProgressView()
                          }
                          .frame(width: 115, height: 115)
                          .clipShape(RoundedRectangle(cornerRadius: 12))
                          .transition(.opacity)
+                    } else if let fallback = fallbackImageUrl, !fallback.isEmpty, let url = URL(string: fallback) {
+                         // 3. Fallback (Trip Image)
+                         AsyncImage(url: url) { image in
+                             image.resizable().aspectRatio(contentMode: .fill)
+                         } placeholder: {
+                            defaultImagePlaceholder
+                         }
+                         .frame(width: 115, height: 115)
+                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     } else {
-                        // 3. Placeholder
+                        // 4. Placeholder
                         defaultImagePlaceholder
                             .frame(width: 115, height: 115)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -1230,13 +1338,13 @@ struct SpotCardView: View {
                             Image(systemName: "clock")
                                 .font(.system(size: 10))
                                 .foregroundColor(.gray)
-                            Text("停留 \(spot.duration)")
+                            Text("停留 " + spot.duration)
                                 .font(.system(size: 10))
                                 .foregroundColor(.gray)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, 24)
+                    .padding(.leading, 34)
                     .padding(.trailing, 45) // Room for buttons
                     
                     // 2. Corner Buttons Overlay
@@ -1282,7 +1390,7 @@ struct SpotCardView: View {
                     }
                     .padding(10) // Equal spacing from all corners
                 }
-                .frame(width: 240, height: 115) // Fixed height to match image
+                .frame(height: isConcise ? 210 : 115) // Reduced height for concise modeFixed height to match image
                 .background(Color.white)
                 .cornerRadius(12)
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.black.opacity(0.8), lineWidth: 1.5))
@@ -1344,23 +1452,27 @@ struct TransportPicker: View {
     var body: some View {
         HStack(spacing: 12) {
             ForEach(types, id: \.self) { type in
-                Button(action: { onSelect(type) }) {
+                Button(action: {
+                    onSelect(type)
+                }) {
                     ZStack {
                         Circle()
                             .fill(currentType == type ? PuboColors.navy : Color.white)
-                            .frame(width: 32, height: 32)
+                            .frame(width: 36, height: 36)
                             .shadow(radius: 2)
                         
                         Image(systemName: iconName(for: type))
-                            .font(.system(size: 14))
+                            .font(.system(size: 18))
                             .foregroundColor(currentType == type ? .white : .gray)
                     }
+                    .scaleEffect(currentType == type ? 1.1 : 1.0)
+                    .animation(.spring(response: 0.2), value: currentType)
                 }
             }
         }
         .padding(8)
         .background(Color.white.opacity(0.9))
-        .cornerRadius(20)
+        .cornerRadius(24)
     }
     
     func iconName(for type: TransportType) -> String {
@@ -1444,7 +1556,7 @@ struct ReplaceSpotSheet: View {
                     withAnimation { showCollection.toggle() }
                     if showCollection { isSearchFocused = false }
                 }) {
-                    Image(systemName: "star.fill")
+                    Image("collection")
                         .font(.system(size: 16))
                         .foregroundColor(showCollection ? PuboColors.yellow : .gray)
                         .frame(width: 32, height: 32)
@@ -1476,9 +1588,15 @@ struct ReplaceSpotSheet: View {
                         }
                     }
                 }
-                .padding(10)
-                .background(Color.gray.opacity(0.08))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color.white)
                 .cornerRadius(12)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(PuboColors.navy, lineWidth: 2)
+                )
+                .retroShadow(color: PuboColors.navy.opacity(0.1), offset: 2)
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 12)
@@ -1633,7 +1751,8 @@ struct ReplaceSpotSheet: View {
                         category: nil,
                         rating: nil,
                         userRatingsTotal: nil,
-                        openingHours: nil
+                        openingHours: nil,
+                        imageUrl: nil
                     )
                     
                     onReplace(spot)
@@ -1657,6 +1776,7 @@ struct ReplaceSpotSheet: View {
         spot.latitude = place.latitude
         spot.longitude = place.longitude
         spot.googlePlaceId = place.id
+        spot.imageUrl = place.contents.first?.previewThumbnailUrl
         
         // Map category
         if let cat = place.category?.lowercased() {
@@ -1682,7 +1802,8 @@ struct ReplaceSpotSheet: View {
             category: place.category,
             rating: place.rating,
             userRatingsTotal: place.userRatingCount,
-            openingHours: openHours
+            openingHours: openHours,
+            imageUrl: place.contents.first?.previewThumbnailUrl
         )
         
         onReplace(spot)
@@ -1769,11 +1890,12 @@ struct CustomRangeCalendarView: View {
                                 .frame(maxWidth: .infinity)
                         }
                     }
+                    .padding(.horizontal, 24)
                     .padding(.top, 16)
                     
                     // Days Grid
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 7), spacing: 16) {
-                        ForEach(daysInMonth(), id: \.self) { date in
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 7), spacing: 14) {
+                        ForEach(Array(daysInMonth().enumerated()), id: \.offset) { index, date in
                             if let date = date {
                                 DayCell(
                                     date: date,
@@ -1786,14 +1908,17 @@ struct CustomRangeCalendarView: View {
                                 }
                             } else {
                                 Text("")
-                                    .frame(width: 36, height: 36)
+                                    .frame(width: 32, height: 32)
                             }
                         }
                     }
+                    .padding(.horizontal, 24)
                     .padding(.bottom, 24)
                     
                     // Footer Buttons
-                    HStack(spacing: 24) {
+                    HStack(spacing: 32) {
+                        Spacer()
+                        
                         Button("清除") {
                             selectedStartDate = nil
                             selectedEndDate = nil
@@ -1812,11 +1937,13 @@ struct CustomRangeCalendarView: View {
                             Text("確認日期")
                                 .font(.system(size: 16, weight: .bold))
                                 .foregroundColor(.white)
-                                .frame(maxWidth: .infinity)
+                                .frame(width: 140)
                                 .padding(.vertical, 14)
                                 .background(PuboColors.navy)
                                 .cornerRadius(28) // Pill shape
                         }
+                        
+                        Spacer()
                     }
                     .padding(.bottom, 24)
                 }

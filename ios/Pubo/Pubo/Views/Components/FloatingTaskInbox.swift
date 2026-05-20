@@ -2,18 +2,17 @@ import SwiftUI
 
 struct FloatingTaskInbox: View {
     var isProcessing: Bool
+    var progress: CGFloat
     var hasResult: Bool
+    var pendingOfflineCount: Int = 0
     var onTap: () -> Void
     
     @State private var dragAmount: CGSize = .zero
     @State private var position: CGSize = CGSize(width: 150, height: -100) // Default top right
-    @State private var progress: CGFloat = 0.0
 
     var body: some View {
         Button(action: {
-            if hasResult {
-                onTap()
-            }
+            onTap()
         }) {
             ZStack(alignment: .topTrailing) {
                 // Main Circle
@@ -31,12 +30,20 @@ struct FloatingTaskInbox: View {
                         .overlay(
                             // Red Dot Notification attached directly to the icon
                             Group {
-                                if hasResult {
-                                    Circle()
-                                        .fill(Color.red)
-                                        .frame(width: 8, height: 8) // slightly smaller relative to the icon
-                                        .overlay(Circle().stroke(Color.white, lineWidth: 1.0))
-                                        .offset(x: 4, y: -4) // pull it closer
+                                if hasResult || pendingOfflineCount > 0 {
+                                    ZStack {
+                                        Circle()
+                                            .fill(Color.red)
+                                            .frame(width: 14, height: 14)
+                                            .overlay(Circle().stroke(Color.white, lineWidth: 1.0))
+                                        
+                                        if pendingOfflineCount > 0 {
+                                            Text("\(pendingOfflineCount)")
+                                                .font(.system(size: 8, weight: .bold))
+                                                .foregroundColor(.white)
+                                        }
+                                    }
+                                    .offset(x: 4, y: -4) // pull it closer
                                 }
                             },
                             alignment: .topTrailing
@@ -49,12 +56,7 @@ struct FloatingTaskInbox: View {
                             .stroke(Color.blue, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                             .frame(width: 62, height: 62)
                             .rotationEffect(Angle(degrees: -90))
-                            .onAppear {
-                                progress = 0.0
-                                withAnimation(Animation.easeInOut(duration: 8.0)) {
-                                    progress = 0.95
-                                }
-                            }
+                            .animation(.easeOut(duration: 0.5), value: progress)
                     }
                     
                     // Full Ring when done -> Red border

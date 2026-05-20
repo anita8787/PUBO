@@ -1,5 +1,6 @@
 import SwiftUI
 import MapKit
+import SwiftData
 
 struct TripMapPlanningView: View {
     @EnvironmentObject var tripManager: TripManager
@@ -14,10 +15,27 @@ struct TripMapPlanningView: View {
     var onAddClick: () -> Void
     var onShareClick: () -> Void
     
+    @Query private var allPackingItems: [SDPackingItem]
+    
+    enum SheetMode {
+        case low, medium, high
+        var height: CGFloat {
+            switch self {
+            case .low: return 210
+            case .medium: return UIScreen.main.bounds.height * 0.58
+            case .high: return UIScreen.main.bounds.height * 0.85
+            }
+        }
+    }
+    
+    @State private var sheetMode: SheetMode = .medium
+    @State private var dragOffset: CGFloat = 0
+    @State private var selectedSpotId: String? = nil
     @State private var mapSubMode: MapSubMode = .overview // Default to overview
-    @State private var isConcise: Bool = false // Default to false (List Mode)
     @State private var isOverviewExpanded: Bool = true // Overview card expanded state
     @State private var activeMemoId: String? // 展開備忘錄的景點 ID
+    @State private var showSettingsModal = false // 設定彈窗
+    @State private var showPackingList = false // 行李清單彈窗
     
     enum MapSubMode {
         case overview, daily
@@ -50,44 +68,38 @@ struct TripMapPlanningView: View {
             bottomSheetPanel
                 .zIndex(10)
         }
+        .sheet(isPresented: $showSettingsModal) {
+            TripSettingsView(tripId: trip.id)
+        }
+        .sheet(isPresented: $showPackingList) {
+            PackingListView(tripId: trip.id)
+        }
     }
     
     private var backButton: some View {
-        Button(action: onBack) {
-            Image(systemName: "chevron.left")
-                .font(.system(size: 20, weight: .bold))
-                .foregroundColor(.black)
-                .frame(width: 40, height: 40)
-                .background(Color.white)
-                .clipShape(Circle())
-                .overlay(Circle().stroke(Color.black, lineWidth: 2))
-                .background(
-                    Circle()
-                        .fill(Color.black.opacity(0.15))
-                        .offset(x: 2.5, y: 2.5)
-                )
-        }
+        headerCircleButton(icon: "arrow.left", action: onBack)
     }
     
     private var headerActionButtons: some View {
         HStack(spacing: 12) {
             headerCircleButton(icon: "square.and.arrow.up", action: onShareClick)
-            headerCircleButton(icon: "gearshape", action: {})
+            headerCircleButton(icon: "gearshape", action: { showSettingsModal = true })
         }
     }
     
     
     // MARK: - 地圖圖層
     private var mapLayer: some View {
-        Map(position: $position) { 
+        Map(position: $position, selection: $selectedSpotId) { 
             ForEach(Array(spots.enumerated()), id: \.offset) { index, spot in
                 if let coord = spot.coordinate {
                     Annotation(spot.name, coordinate: CLLocationCoordinate2D(
                         latitude: coord.lat,
                         longitude: coord.long
-                    )) {
+                    ), anchor: .bottom) {
                         mapMarker(for: spot, index: index)
                     }
+                    .tag(spot.id)
                 }
             }
             
@@ -95,7 +107,7 @@ struct TripMapPlanningView: View {
             if !routes.isEmpty {
                 ForEach(routes, id: \.self) { route in
                     MapPolyline(route)
-                        .stroke(Color(hex: "FFC649").opacity(0.8), lineWidth: 5)
+                        .stroke(Color.red.opacity(0.8), lineWidth: 5)
                 }
             }
             
@@ -106,7 +118,7 @@ struct TripMapPlanningView: View {
                     MapPolyline(coordinates: path)
                         .stroke(
                             LinearGradient(
-                                colors: [Color(hex: "FFC649"), Color(hex: "FFC649").opacity(0.3)],
+                                colors: [Color.red, Color.red.opacity(0.5)],
                                 startPoint: .leading,
                                 endPoint: .trailing
                             ),
@@ -121,7 +133,7 @@ struct TripMapPlanningView: View {
                     }
                     return nil
                 })
-                .stroke(Color(hex: "FFC649").opacity(0.3), lineWidth: 2)
+                .stroke(Color.red.opacity(0.5), lineWidth: 2)
             }
         }
         .mapStyle(.standard(elevation: .realistic))
@@ -160,8 +172,11 @@ struct TripMapPlanningView: View {
                 let endLocation = CLLocation(latitude: endCoord.lat, longitude: endCoord.long)
                 
                 let request = MKDirections.Request()
-                request.source = MKMapItem(location: startLocation, address: nil)
-                request.destination = MKMapItem(location: endLocation, address: nil)
+                let startPlacemark = MKPlacemark(coordinate: startLocation.coordinate)
+                let endPlacemark = MKPlacemark(coordinate: endLocation.coordinate)
+                
+                request.source = MKMapItem(placemark: startPlacemark)
+                request.destination = MKMapItem(placemark: endPlacemark)
                 
                 // Determine transport type based on spot preference or default to automobile
                 switch spots[i].travelMode {
@@ -313,44 +328,23 @@ struct TripMapPlanningView: View {
     // MARK: - 地圖標記
     @ViewBuilder
     private func mapMarker(for spot: ItinerarySpot, index: Int) -> some View {
-        VStack(spacing: 0) {
-            ZStack(alignment: .topTrailing) {
-                // Main Marker Circle
-                ZStack {
-                    Circle()
-                        .fill(Color.white)
-                        .frame(width: 32, height: 32)
-                        .retroShadow(color: .black.opacity(0.1), offset: 2)
-                        .overlay(Circle().stroke(PuboColors.navy, lineWidth: 1.5))
-                    
-                    // Category Icon
-                    categoryIcon(for: spot.category)
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(PuboColors.navy)
-                }
-                
-                // Index Badge (Small Red Circle)
-                ZStack {
-                    Circle()
-                        .fill(PuboColors.red)
-                        .frame(width: 14, height: 14)
-                        .overlay(Circle().stroke(Color.white, lineWidth: 1))
-                    
-                    Text("\(index + 1)")
-                        .font(.system(size: 8, weight: .black))
-                        .foregroundColor(.white)
-                }
-                .offset(x: 4, y: -4)
-            }
+        let isSelected = selectedSpotId == spot.id
+        
+        // Visual Marker
+        ZStack(alignment: .center) {
+            Image("map pin")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 60, height: 60)
+                .shadow(color: .black.opacity(0.15), radius: 3, y: 2)
             
-            // 下方加入倒三角形當作大頭針的尖角
-            Triangle()
-                .fill(PuboColors.navy)
-                .frame(width: 10, height: 8)
-                .rotationEffect(.degrees(180))
-                .offset(y: -1) // 微微向上偏移貼合圓圈
+            Text("\(index + 1)")
+                .font(.system(size: 16, weight: .black))
+                .foregroundColor(isSelected ? Color.blue : PuboColors.navy)
+                .offset(y: -6)
         }
-        .offset(y: -16) // 讓尖角正對著座標點 (32+8=40/2=20，微調讓底部針尖對齊座標)
+        .scaleEffect(isSelected ? 1.3 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isSelected)
     }
     
     private func categoryIcon(for category: SpotCategory?) -> Image {
@@ -361,6 +355,16 @@ struct TripMapPlanningView: View {
         case .attraction: return Image(systemName: "camera.fill")
         case .spot: return Image(systemName: "mappin.and.ellipse")
         default: return Image(systemName: "mappin.and.ellipse")
+        }
+    }
+    private func categoryTitle(for category: SpotCategory?) -> String {
+        switch category {
+        case .food: return "美食"
+        case .shopping: return "購物"
+        case .accommodation: return "住宿"
+        case .transport: return "交通"
+        case .attraction, .spot: return "景點"
+        default: return "景點"
         }
     }
     
@@ -394,7 +398,7 @@ struct TripMapPlanningView: View {
             // 內容區域
             contentArea
         }
-        .frame(height: isConcise ? 310 : ScreenUtils.height * 0.58) // 摺疊時高度需足以顯示輪播卡片
+        .frame(height: max(210, sheetMode.height - dragOffset))
         .background(Color(hex: "FDFAEE"))
         .clipShape(RoundedCorner(radius: 40, corners: [.topLeft, .topRight]))
         .overlay(
@@ -402,24 +406,66 @@ struct TripMapPlanningView: View {
                 .stroke(Color.black, lineWidth: 2)
         )
         .shadow(color: .black.opacity(0.12), radius: 20, y: -10)
-        .animation(.spring(response: 0.45, dampingFraction: 0.8), value: isConcise)
-        // 移除強制重置視圖的 .id，避免添加景點後自動跳回總覽
+        .animation(.spring(response: 0.45, dampingFraction: 0.8), value: sheetMode)
+        .animation(.interactiveSpring(), value: dragOffset)
     }
     
     // MARK: - 拖曳把手
     private var dragHandle: some View {
-        Button(action: { isConcise.toggle() }) {
-            VStack {
-                Spacer()
-                RoundedRectangle(cornerRadius: 3)
-                    .fill(Color.gray.opacity(0.25))
-                    .frame(width: 48, height: 4)
-                Spacer()
-            }
-            .frame(height: 32)
-            .frame(maxWidth: .infinity)
+        VStack {
+            Spacer()
+            RoundedRectangle(cornerRadius: 3)
+                .fill(Color.gray.opacity(0.25))
+                .frame(width: 48, height: 4)
+            Spacer()
         }
-        .buttonStyle(.plain)
+        .frame(height: 32)
+        .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture()
+                .onChanged { value in
+                    // Limit dragging upwards beyond high or downwards beyond low
+                    let drag = value.translation.height
+                    let newHeight = sheetMode.height - drag
+                    
+                    if newHeight > SheetMode.high.height {
+                        dragOffset = drag + (newHeight - SheetMode.high.height) * 0.9 // Resistance
+                    } else if newHeight < SheetMode.low.height {
+                        dragOffset = drag + (newHeight - SheetMode.low.height) * 0.9 // Resistance
+                    } else {
+                        dragOffset = drag
+                    }
+                }
+                .onEnded { value in
+                    let velocity = value.velocity.height
+                    let drag = value.translation.height
+                    let newHeight = sheetMode.height - drag
+                    
+                    withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) {
+                        dragOffset = 0
+                        
+                        // Use velocity to flick, or snap to nearest
+                        if velocity > 500 { // Flicked down
+                            if sheetMode == .high { sheetMode = .medium }
+                            else { sheetMode = .low }
+                        } else if velocity < -500 { // Flicked up
+                            if sheetMode == .low { sheetMode = .medium }
+                            else { sheetMode = .high }
+                        } else {
+                            // Snap to nearest
+                            let distances = [
+                                (SheetMode.low, abs(newHeight - SheetMode.low.height)),
+                                (SheetMode.medium, abs(newHeight - SheetMode.medium.height)),
+                                (SheetMode.high, abs(newHeight - SheetMode.high.height))
+                            ]
+                            if let nearest = distances.min(by: { $0.1 < $1.1 }) {
+                                sheetMode = nearest.0
+                            }
+                        }
+                    }
+                }
+        )
     }
     
     // MARK: - 日期選擇器
@@ -429,7 +475,7 @@ struct TripMapPlanningView: View {
                 // 總覽 Tab
                 Button(action: {
                     mapSubMode = .overview
-                    isConcise = false // 點擊總覽時自動展開面板
+                    sheetMode = .medium // 點擊總覽時自動展開面板
                 }) {
                     let isSelected = mapSubMode == .overview
                     Text("總覽")
@@ -480,8 +526,8 @@ struct TripMapPlanningView: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 14) // Increased for shadow room
+            .padding(.horizontal, 32)
+            .padding(.vertical, 16) // Increased for shadow room
         }
         .overlay(
             Rectangle()
@@ -494,7 +540,7 @@ struct TripMapPlanningView: View {
     // MARK: - 內容區域
     @ViewBuilder
     private var contentArea: some View {
-        if isConcise {
+        if sheetMode == .low {
             conciseSpotCarousel
         } else {
             ScrollView(showsIndicators: false) {
@@ -516,7 +562,7 @@ struct TripMapPlanningView: View {
             }
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
-        .frame(height: 240)
+        .frame(height: 190)
     }
     
     private func conciseSpotCard(spot: ItinerarySpot, index: Int) -> some View {
@@ -535,7 +581,7 @@ struct TripMapPlanningView: View {
                 
                 // 文字資訊
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(spot.category == .food ? "美食" : "景點")
+                    Text(categoryTitle(for: spot.category))
                         .font(.system(size: 11, weight: .black))
                         .foregroundColor(Color(hex: "023B7E"))
                         .textCase(.uppercase)
@@ -577,7 +623,7 @@ struct TripMapPlanningView: View {
                                  .font(.system(size: 10, weight: .black))
                                  .foregroundColor(.gray.opacity(0.4))
                          }
-                         .frame(maxWidth: .infinity, alignment: .leading)
+                         .frame(maxWidth: .infinity, alignment: .center)
                     } else {
                         Spacer().frame(maxWidth: .infinity)
                     }
@@ -601,14 +647,14 @@ struct TripMapPlanningView: View {
                 Group {
                     if index < spots.count - 1, let transport = spot.travelToNext {
                         HStack(spacing: 4) {
-                            Text(verbatim: "\(transport.time) \(transport.distance)")
-                                .font(.system(size: 10, weight: .black))
-                                .foregroundColor(.gray.opacity(0.4))
                             Image(systemName: transport.type == .train ? "tram.fill" : (transport.type == .car ? "car.fill" : (transport.type == .bus ? "bus.fill" : "figure.walk")))
                                 .font(.system(size: 12))
                                 .foregroundColor(.gray.opacity(0.4))
+                            Text(verbatim: "\(transport.time) \(transport.distance)")
+                                .font(.system(size: 10, weight: .black))
+                                .foregroundColor(.gray.opacity(0.4))
                         }
-                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .frame(maxWidth: .infinity, alignment: .center)
                     } else {
                         Spacer().frame(maxWidth: .infinity)
                     }
@@ -700,25 +746,59 @@ struct TripMapPlanningView: View {
                     .textCase(.uppercase)
             }
             
-            HStack(spacing: 12) {
-                // Circular Plus Button
-                Button(action: {
-                    // Action for add luggage item
-                }) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 12, weight: .bold)) // Smaller icon
-                        .foregroundColor(PuboColors.navy)
-                        .frame(width: 24, height: 24) // Smaller frame
-                        .background(Color.clear)
-                        .overlay(Circle().stroke(PuboColors.navy, lineWidth: 2))
+            let tripItems = allPackingItems.filter { $0.trip?.id == trip.id }
+            let uncheckedItems = tripItems.filter { !$0.isChecked }
+            
+            if tripItems.isEmpty {
+                HStack(spacing: 12) {
+                    // Circular Plus Button
+                    Button(action: {
+                        showPackingList = true
+                    }) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 12, weight: .bold)) // Smaller icon
+                            .foregroundColor(PuboColors.navy)
+                            .frame(width: 24, height: 24) // Smaller frame
+                            .background(Color.clear)
+                            .overlay(Circle().stroke(PuboColors.navy, lineWidth: 2))
+                    }
+                    
+                    Text("快點添加你的出遊物品吧這樣子")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.gray.opacity(0.5))
                 }
-                
-                Text("快點添加你的出遊物品吧這樣子")
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundColor(.gray.opacity(0.5))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(uncheckedItems.prefix(3)) { item in
+                        HStack(spacing: 12) {
+                            Image(systemName: "circle")
+                                .font(.system(size: 12))
+                                .foregroundColor(.gray)
+                            Text(item.name)
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.black)
+                                .lineLimit(1)
+                        }
+                    }
+                    if uncheckedItems.count > 3 {
+                        Text("還有 \(uncheckedItems.count - 3) 項未完成...")
+                            .font(.system(size: 12))
+                            .foregroundColor(.gray)
+                            .padding(.top, 4)
+                    } else if uncheckedItems.isEmpty {
+                        HStack(spacing: 12) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundColor(PuboColors.navy)
+                            Text("行李都準備好囉！")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(PuboColors.navy)
+                        }
+                    }
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(24)
         .background(Color.white)
         .cornerRadius(40)
@@ -731,6 +811,10 @@ struct TripMapPlanningView: View {
                 .fill(PuboColors.navy.opacity(0.15))
                 .offset(x: 2.5, y: 2.5)
         )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            showPackingList = true
+        }
     }
     
     // MARK: - 每日景點列表
@@ -788,84 +872,71 @@ struct TripMapPlanningView: View {
     }
     
     private func spotRow(spot: ItinerarySpot, index: Int) -> some View {
-        HStack(alignment: .center, spacing: 14) {
-            // 景點圖片
-            AsyncImage(url: URL(string: spot.image)) { img in
-                img.resizable().aspectRatio(contentMode: .fill)
-            } placeholder: {
-                RoundedRectangle(cornerRadius: 12).fill(Color.gray.opacity(0.15))
-            }
-            .frame(width: 64, height: 64)
-            .cornerRadius(12)
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.gray.opacity(0.1), lineWidth: 1))
-            
-            // 景點資訊
-            VStack(alignment: .leading, spacing: 4) {
-                Text(spot.category == .food ? "美食" : "景點")
-                    .font(.system(size: 9, weight: .black))
-                    .foregroundColor(Color(hex: "023B7E"))
-                    .tracking(2)
-                    .textCase(.uppercase)
+        SwipeToDeleteWrapper(onDelete: {
+            tripManager.deleteSpot(tripId: trip.id, dayIndex: selectedDayIndex, spotId: spot.id)
+        }) {
+            HStack(alignment: .center, spacing: 14) {
+                // 景點圖片
+                AsyncImage(url: URL(string: spot.image)) { img in
+                    img.resizable().aspectRatio(contentMode: .fill)
+                } placeholder: {
+                    RoundedRectangle(cornerRadius: 12).fill(Color.gray.opacity(0.15))
+                }
+                .frame(width: 64, height: 64)
+                .cornerRadius(12)
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.gray.opacity(0.1), lineWidth: 1))
                 
-                Text(verbatim: "\(index + 1). \(spot.name)")
-                    .font(.system(size: 17, weight: .bold)) // Less bold (black -> bold)
-                    .foregroundColor(.black)
-                    .lineLimit(1)
-                    .textCase(.uppercase)
-                
-                HStack(spacing: 5) {
-                    Image(systemName: "clock.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(.gray)
-                    Text("停留" + (spot.subLabel ?? ""))
-                        .font(.system(size: 11, weight: .black))
-                        .foregroundColor(.gray)
+                // 景點資訊
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(spot.category == .food ? "美食" : "景點")
+                        .font(.system(size: 9, weight: .black))
+                        .foregroundColor(Color(hex: "023B7E"))
+                        .tracking(2)
                         .textCase(.uppercase)
+                    
+                    Text(verbatim: "\(index + 1). \(spot.name)")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundColor(.black)
+                        .lineLimit(1)
+                        .textCase(.uppercase)
+                    
+                    HStack(spacing: 5) {
+                        Image(systemName: "clock.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.gray)
+                        Text("停留" + (spot.subLabel ?? ""))
+                            .font(.system(size: 11, weight: .black))
+                            .foregroundColor(.gray)
+                            .textCase(.uppercase)
+                    }
                 }
-            }
-            
-            
-            Spacer()
-            
-            // 刪除按鈕 (地圖內快速操作)
-            Button(action: {
-                tripManager.deleteSpot(tripId: trip.id, dayIndex: selectedDayIndex, spotId: spot.id)
-            }) {
-                Image(systemName: "trash")
-                    .font(.system(size: 14))
-                    .foregroundColor(.red.opacity(0.6))
-                    .padding(8)
-                    .background(Color.red.opacity(0.1))
-                    .clipShape(Circle())
-            }
-            
-            // 勾勾按鈕（點擊切換備忘錄）
-            Button(action: {
-                withAnimation(.easeOut(duration: 0.2)) {
-                    activeMemoId = activeMemoId == spot.id ? nil : spot.id
+                
+                Spacer()
+                
+                // 備忘錄按鈕 (Schedule Icon)
+                Button(action: {
+                    // Using direct state toggle without withAnimation to test if it prevents the flicker/reset
+                    if activeMemoId == spot.id {
+                        activeMemoId = nil
+                    } else {
+                        activeMemoId = spot.id
+                    }
+                }) {
+                    ZStack {
+                        Image(activeMemoId == spot.id ? "schedule_active" : "schedule")
+                            .renderingMode(.original)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 35, height: 35)
+                    }
                 }
-            }) {
-                Image(systemName: "checkmark.square")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.black)
-                    .frame(width: 34, height: 34)
-                    .background(Color.white)
-                    .cornerRadius(10)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color.black, lineWidth: 2)
-                    )
-                    .background(
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(Color.black.opacity(0.1))
-                            .offset(x: 2, y: 2)
-                    )
+                .buttonStyle(.plain)
             }
-        }
-        .padding(.vertical, 8)
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            focusOnSpot(spot)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) {
+                focusOnSpot(spot)
+            }
         }
     }
     

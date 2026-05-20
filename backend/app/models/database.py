@@ -33,11 +33,23 @@ class Content(Base):
     preview_thumbnail_url = Column(String, nullable=True)
     published_at = Column(DateTime, nullable=True)
     user_tags = Column(JSON, default=[]) # 存儲標籤清單
+    is_collected = Column(Integer, default=0) # 0:未收藏, 1:已收藏
     
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationship
     place_associations = relationship("ContentPlaceAssociation", back_populates="content", cascade="all, delete-orphan")
+
+    @property
+    def places(self):
+        """轉換為 Pydantic ContentResponse 所需的格式"""
+        return [
+            {
+                "place": ass.place,
+                "evidence_text": ass.evidence_text,
+                "confidence_score": ass.confidence_score
+            } for ass in self.place_associations
+        ]
 
 class Place(Base):
     __tablename__ = "places"
@@ -67,6 +79,7 @@ class Task(Base):
     id = Column(Integer, primary_key=True, index=True)
     task_id = Column(String, unique=True, index=True, nullable=False)
     status = Column(String, default="pending")
+    progress = Column(Float, default=0.0)
     target_url = Column(String, nullable=False)
     result = Column(JSON, nullable=True)
     error = Column(String, nullable=True)
@@ -146,6 +159,20 @@ class AIAnalysisCache(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+class CuratedPost(Base):
+    __tablename__ = "curated_posts"
+    
+    id = Column(String, primary_key=True, index=True) # UUID
+    title = Column(String, nullable=False)
+    cover_image = Column(String, nullable=True)
+    author = Column(String, nullable=True)
+    source_url = Column(String, unique=True, nullable=False, index=True)
+    spots = Column(JSON, default=[]) # List of simplified spot dicts
+    spot_count = Column(Integer, default=0)
+    country = Column(String, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 # Database Setup
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -154,7 +181,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL")
+
 if not DATABASE_URL:
     # On Vercel, the filesystem is read-only. We must use /tmp for SQLite to avoid crashing.
     if os.environ.get("VERCEL"):
@@ -162,10 +190,20 @@ if not DATABASE_URL:
     else:
         DATABASE_URL = "sqlite:///./pubo.db"
 
-# SQLite 特定設定 (check_same_thread)
-connect_args = {"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
+# Database Configuration
+if "postgresql" in DATABASE_URL:
+    # PostgreSQL 特有設定：連線池優化
+    engine_args = {
+        "pool_size": 5,
+        "max_overflow": 10,
+        "pool_timeout": 30,
+        "pool_recycle": 1800,
+    }
+else:
+    # SQLite 特定設定 (check_same_thread)
+    engine_args = {"connect_args": {"check_same_thread": False}}
 
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
+engine = create_engine(DATABASE_URL, **engine_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db():

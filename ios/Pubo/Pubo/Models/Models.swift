@@ -1,5 +1,8 @@
 import Foundation
 import CoreLocation
+import Combine
+
+// CLLocationCoordinate2D Equatable conformance is handled in PuboModels.swift
 
 // MARK: - Enums
 
@@ -67,6 +70,8 @@ struct Trip: Identifiable, Codable {
     var endDate: Date?
     var coverImageUrl: String?
     var transportMode: String?
+    var updatedAt: Date?
+    var inviteCode: String?
     var days: [ItineraryDay]?
     
     // UI Helpers / Computed Properties
@@ -103,6 +108,7 @@ struct Trip: Identifiable, Codable {
         case endDate = "end_date"
         case coverImageUrl = "cover_image_url"
         case transportMode = "transport_mode"
+        case inviteCode = "invite_code"
         case days
     }
 }
@@ -121,25 +127,46 @@ struct TravelInfo: Codable {
 }
 
 // MARK: - Opening Hours Models
-struct TimePoint: Codable {
+struct TimePoint: Codable, Sendable {
     let day: Int
     let hour: Int
     let minute: Int
 }
 
-struct GooglePeriod: Codable {
+struct GooglePeriod: Codable, Sendable {
     let open: TimePoint
     let close: TimePoint?
 }
 
-struct OpenHours: Codable {
+struct OpenHours: Codable, Sendable {
+    let openNow: Bool?
     let periods: [GooglePeriod]?
-    let weekdayText: [String]?
+    let weekdayDescriptions: [String]?
+    
+    enum CodingKeys: String, CodingKey {
+        case periods
+        case openNow = "openNow"
+        case weekdayDescriptions = "weekdayDescriptions"
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.openNow = try container.decodeIfPresent(Bool.self, forKey: .openNow)
+        self.periods = try container.decodeIfPresent([GooglePeriod].self, forKey: .periods)
+        self.weekdayDescriptions = try container.decodeIfPresent([String].self, forKey: .weekdayDescriptions)
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(openNow, forKey: .openNow)
+        try container.encodeIfPresent(periods, forKey: .periods)
+        try container.encodeIfPresent(weekdayDescriptions, forKey: .weekdayDescriptions)
+    }
 }
 
 struct PlaceInfo: Codable {
     var name: String?
-    var placeId: String? // Added to satisfy backend PlaceBase requirement
+    var placeId: String?
     var address: String?
     var latitude: Double?
     var longitude: Double?
@@ -147,10 +174,14 @@ struct PlaceInfo: Codable {
     let rating: Double?
     let userRatingsTotal: Int?
     let openingHours: OpenHours?
+    let imageUrl: String?
     
     enum CodingKeys: String, CodingKey {
-        case name, address, latitude, longitude, category
-        case placeId, rating, userRatingsTotal, openingHours
+        case name, address, latitude, longitude, category, rating
+        case placeId = "place_id"
+        case userRatingsTotal = "user_ratings_total"
+        case openingHours = "opening_hours"
+        case imageUrl = "image_url"
     }
 }
 
@@ -252,7 +283,7 @@ struct ItinerarySpot: Identifiable, Codable {
              }
         }
         
-        if let weekdayText = place?.openingHours?.weekdayText?.first {
+        if let weekdayText = place?.openingHours?.weekdayDescriptions?.first {
             // "Monday: 9:00 AM – 5:00 PM" -> extract 9:00 AM
             let parts = weekdayText.components(separatedBy: ": ")
             if parts.count > 1 {
@@ -268,10 +299,17 @@ struct ItinerarySpot: Identifiable, Codable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, category, notes, place
-        case startTime, stayDuration, imageUrl, sortOrder
+        case startTime = "start_time"
+        case stayDuration = "stay_duration"
+        case imageUrl = "image_url"
+        case sortOrder = "sort_order"
         case latitude, longitude
-        case dayId, placeId, googlePlaceId
-        case travelMode, travelTime, travelDistance
+        case dayId = "day_id"
+        case placeId = "place_id"
+        case googlePlaceId = "google_place_id"
+        case travelMode = "travel_mode"
+        case travelTime = "travel_time"
+        case travelDistance = "travel_distance"
     }
     
     static func empty() -> ItinerarySpot {
@@ -334,6 +372,14 @@ struct ItineraryDay: Identifiable, Codable {
     }
 }
 
+struct Recommendation: Identifiable, Codable {
+    let id: String
+    let category: String
+    let name: String
+    let rating: Double
+    let image: String
+}
+
 struct Post: Identifiable, Codable {
     let id: String
     var author: String
@@ -392,4 +438,72 @@ struct MapPlace: Identifiable {
     let image: String
     let coordinate: CLLocationCoordinate2D
     var description: String? = nil
+    var sourceImageUrl: String? = nil
+    var sourceAuthor: String? = nil
+    var googlePlaceId: String? = nil
+    
+    init(id: String, name: String, rating: Double, category: String, time: String, address: String, image: String, coordinate: CLLocationCoordinate2D, description: String? = nil, sourceImageUrl: String? = nil, sourceAuthor: String? = nil, googlePlaceId: String? = nil) {
+        self.id = id
+        self.name = name
+        self.rating = rating
+        self.category = category
+        self.time = time
+        self.address = address
+        self.image = image
+        self.coordinate = coordinate
+        self.description = description
+        self.sourceImageUrl = sourceImageUrl
+        self.sourceAuthor = sourceAuthor
+        self.googlePlaceId = googlePlaceId
+    }
+}
+
+struct CuratedPost: Identifiable, Codable {
+    let id: String
+    let title: String
+    let coverImageUrl: String?
+    let author: String?
+    let sourceUrl: String?
+    let spots: [PlaceInfo]?
+    let spotCount: Int?
+    let country: String?
+    let createdAt: Date? // Made optional to fix keyNotFound decoding error
+    
+    enum CodingKeys: String, CodingKey {
+        case id, title, author, spots, country
+        case coverImageUrl = "cover_image"
+        case sourceUrl = "source_url"
+        case spotCount = "spot_count"
+        case createdAt = "created_at"
+    }
+}
+
+
+// MARK: - SDPlace Extension for UI
+extension SDPlace {
+    var decodedOpeningHours: OpenHours? {
+        guard let data = openingHours?.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(OpenHours.self, from: data)
+    }
+    
+    var simplifiedStatusText: String {
+        guard let hours = decodedOpeningHours, let periods = hours.periods, !periods.isEmpty else {
+            return ""
+        }
+        
+        let calendar = Calendar.current
+        var today = calendar.component(.weekday, from: Date()) - 1 // Sunday = 0 in Google, 1 in Calendar
+        if today < 0 { today = 6 }
+        
+        if let todayPeriod = periods.first(where: { $0.open.day == today }) {
+            let openTime = String(format: "%02d:%02d", todayPeriod.open.hour, todayPeriod.open.minute)
+            if let close = todayPeriod.close {
+                let closeTime = String(format: "%02d:%02d", close.hour, close.minute)
+                return "\(openTime) - \(closeTime)"
+            }
+            return "\(openTime) 開始營業"
+        }
+        
+        return ""
+    }
 }

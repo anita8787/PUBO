@@ -2,8 +2,11 @@ import SwiftUI
 
 struct ShareTripModal: View {
     @Binding var isPresented: Bool
+    let trip: Trip?
     var onGenerateImage: (() -> Void)? = nil
     var onCollaborate: (() -> Void)? = nil
+    
+    @State private var showCopyToast = false
     
     var body: some View {
         ZStack {
@@ -64,11 +67,35 @@ struct ShareTripModal: View {
                         .padding(.horizontal, 24)
                     
                     // Share Options
-                    HStack(spacing: 30) {
-                        ShareOptionItem(icon: "link", label: "複製連結")
-                        ShareOptionItem(icon: "envelope", label: "Email")
-                        ShareOptionItem(icon: "qrcode", label: "掃碼分享")
-                        ShareOptionItem(icon: "ellipsis", label: "更多")
+                    HStack(spacing: 24) {
+                        ShareOptionItem(icon: "link", label: "複製連結") {
+                            copyInviteLink()
+                        }
+                        .overlay(alignment: .top) {
+                            if showCopyToast {
+                                Text("已複製")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.black.opacity(0.8))
+                                    .cornerRadius(8)
+                                    .offset(y: -40)
+                                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                            }
+                        }
+                        
+                        ShareOptionItem(icon: "envelope", label: "Email") {
+                            sendEmail()
+                        }
+                        
+                        ShareOptionItem(icon: "bubble.left.fill", label: "LINE") {
+                            shareToLine()
+                        }
+                        
+                        ShareOptionItem(icon: "ellipsis", label: "更多") {
+                            showSystemShareSheet()
+                        }
                     }
                     .padding(.bottom, 32)
                 }
@@ -78,6 +105,49 @@ struct ShareTripModal: View {
                 .transition(.move(edge: .bottom))
             }
             .ignoresSafeArea(edges: .bottom)
+        }
+    }
+    
+    private func copyInviteLink() {
+        guard let inviteCode = trip?.inviteCode else { return }
+        UIPasteboard.general.string = inviteCode
+        withAnimation {
+            showCopyToast = true
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            withAnimation {
+                showCopyToast = false
+            }
+        }
+    }
+    
+    private func sendEmail() {
+        guard let trip = trip, let inviteCode = trip.inviteCode else { return }
+        let subject = "快來和我一起在 Pubo 規劃「\(trip.title)」！"
+        let body = "我正在使用 Pubo App 規劃旅行，快點加入我吧！\n\n行程名稱：\(trip.title)\n邀請碼：\(inviteCode)"
+        let encodedSubject = subject.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        if let url = URL(string: "mailto:?subject=\(encodedSubject)&body=\(encodedBody)") {
+            UIApplication.shared.open(url)
+        }
+    }
+    
+    private func shareToLine() {
+        guard let trip = trip, let inviteCode = trip.inviteCode else { return }
+        let text = "快來和我一起在 Pubo 規劃「\(trip.title)」！\n邀請碼：\(inviteCode)"
+        let encodedText = text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        if let url = URL(string: "line://msg/text/\(encodedText)") {
+            UIApplication.shared.open(url)
+        }
+    }
+    
+    private func showSystemShareSheet() {
+        guard let trip = trip, let inviteCode = trip.inviteCode else { return }
+        let text = "快來和我一起在 Pubo 規劃「\(trip.title)」！\n使用 Pubo App 輸入邀請碼加入：\(inviteCode)"
+        let av = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = windowScene.windows.first?.rootViewController {
+            rootVC.present(av, animated: true)
         }
     }
 }
@@ -130,20 +200,25 @@ struct ActionButton: View {
 struct ShareOptionItem: View {
     let icon: String
     let label: String
+    let action: () -> Void
     
     var body: some View {
-        VStack(spacing: 12) {
-            ZStack {
-                Circle()
-                    .stroke(Color.gray.opacity(0.2), lineWidth: 1)
-                    .frame(width: 60, height: 60)
-                Image(systemName: icon)
-                    .font(.system(size: 24))
-                    .foregroundColor(PuboColors.navy)
+        Button(action: action) {
+            VStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                        .frame(width: 60, height: 60)
+                        .background(Circle().fill(Color.white))
+                    Image(systemName: icon)
+                        .font(.system(size: 24))
+                        .foregroundColor(PuboColors.navy)
+                }
+                Text(label)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.gray)
             }
-            Text(label)
-                .font(.system(size: 12, weight: .bold))
-                .foregroundColor(.gray)
         }
+        .buttonStyle(.plain)
     }
 }

@@ -18,3 +18,15 @@ ios/Pubo.xcodeproj/xcuserdata/
 
 # Secrets
 ios/Pubo/Pubo/Secrets.swift
+backend/pubo.db
+pubo.db
+backend/venv/
+backend/firebase-key.json
+backend/.env
+.env
+**/.DS_Store
+venv/
+backend/__pycache__/
+九個項目的CSV/
+ios/Pubo/Pubo.xcodeproj/project.xcworkspace/xcuserdata/
+ios/Pubo/Pubo.xcodeproj/xcuserdata/

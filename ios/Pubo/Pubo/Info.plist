@@ -24,5 +24,13 @@
     <string>需要權限以儲存行程長圖至相簿</string>
     <key>UIUserInterfaceStyle</key>
     <string>Light</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Pubo 需要您的位置來偵測您所在的城市，以提供當地天氣與推薦景點。</string>
+    <key>LSApplicationQueriesSchemes</key>
+    <array>
+        <string>comgooglemaps</string>
+        <string>googlemaps</string>
+        <string>nmap</string>
+    </array>
 </dict>
 </plist>

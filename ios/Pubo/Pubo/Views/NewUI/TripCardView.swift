@@ -5,8 +5,10 @@ struct TripCardView: View {
     let date: String
     let spotsCount: Int
     let color: String
-    
-    // 映射顏色字串到由 DesignSystem 定義的顏色
+    let tripId: String
+    var inviteCode: String? = nil
+    var onShareTap: (() -> Void)? = nil
+
     private var bgColor: Color {
         switch color {
         case "yellow": return Color(hex: "FFD54F")   // Light warm yellow
@@ -29,8 +31,8 @@ struct TripCardView: View {
         }
     }
     
-    @State private var showShareSheet = false
-    
+
+
     var body: some View {
         ZStack {
             // Shadow Layer
@@ -76,18 +78,27 @@ struct TripCardView: View {
                     
                     Spacer()
                     
-                    // Share Button — triggers iOS share sheet
+                    // 分享 / 協作按鈕
                     Button(action: {
-                        showShareSheet = true
+                        onShareTap?()
                     }) {
-                        Image(systemName: "square.and.arrow.up")
-                            .font(.system(size: 16))
-                            .foregroundColor(.black)
-                            .frame(width: 36, height: 36)
-                            .background(Color.white)
-                            .clipShape(Circle())
-                            .overlay(Circle().stroke(Color.black, lineWidth: 1.5))
-                            .shadow(color: .black.opacity(0.2), radius: 0, x: 2, y: 2)
+                        ZStack {
+                            Image(systemName: "square.and.arrow.up")
+                                .font(.system(size: 16))
+                                .foregroundColor(.black)
+                                .frame(width: 36, height: 36)
+                                .background(Color.white)
+                                .clipShape(Circle())
+                                .overlay(Circle().stroke(Color.black, lineWidth: 1.5))
+                                .shadow(color: .black.opacity(0.2), radius: 0, x: 2, y: 2)
+                            // 協作指示小點
+                            if inviteCode != nil {
+                                Circle()
+                                    .fill(Color(hex: "4CAF50"))
+                                    .frame(width: 8, height: 8)
+                                    .offset(x: 13, y: -13)
+                            }
+                        }
                     }
                     .buttonStyle(.plain)
                 }
@@ -104,9 +115,5 @@ struct TripCardView: View {
         }
         .padding(.horizontal)
         .padding(.bottom, 4)
-        .sheet(isPresented: $showShareSheet) {
-            ShareSheet(activityItems: ["看看我的旅程：\(title) \(date)"])
-        }
     }
 }
-

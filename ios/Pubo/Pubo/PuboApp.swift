@@ -6,21 +6,42 @@
 //
 
 import SwiftUI
+import FirebaseCore
+import FirebaseAuth
 import SwiftData
 
+class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
+        FirebaseApp.configure()
+        print("✅ Firebase 連線成功")
+        return true
+    }
+}
 @main
 struct PuboApp: App {
     let container: ModelContainer
     @State private var pendingImport: PendingImport?
-    
+    @State private var showTaskQueue: Bool = false
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var delegate
     init() {
         do {
-            container = try ModelContainer(for: 
-                SDContent.self, 
+            let schema = Schema([
+                SDContent.self,
                 SDPlace.self,
                 SDTrip.self,
                 SDItineraryDay.self,
-                SDItinerarySpot.self
+                SDItinerarySpot.self,
+                SDOfflineTask.self
+            ])
+            // 輕量級 Migration：新增欄位有預設値，不需要資料転移
+            let modelConfiguration = ModelConfiguration(
+                schema: schema,
+                isStoredInMemoryOnly: false
+            )
+            container = try ModelContainer(
+                for: schema,
+                configurations: [modelConfiguration]
             )
         } catch {
             fatalError("Failed to ModelContainer: \(error)")
@@ -28,90 +49,101 @@ struct PuboApp: App {
     }
     
     @StateObject private var tripManager = TripManager()
-    
-    // Floating Inbox States
-    @State private var isProcessing: Bool = false
-    @State private var readyImport: PendingImport?
-
+    @StateObject private var dataService = DataService.shared
+    @StateObject private var locationManager = LocationManager.shared
+    @StateObject private var networkMonitor = NetworkMonitor.shared
+    @StateObject private var backgroundTaskManager = BackgroundTaskManager.shared
+    @StateObject private var authManager = AuthManager.shared
+    @State private var pendingJoinCode: String? = nil
     var body: some Scene {
         WindowGroup {
             ZStack {
                 NewHomeView()
                     .environmentObject(tripManager)
+                    .environmentObject(dataService)
+                    .environmentObject(locationManager)
+                    .environmentObject(networkMonitor)
+                    .environmentObject(backgroundTaskManager)
                     .modelContainer(container)
                     .onAppear {
                         DataService.shared.setContext(container.mainContext)
+                        networkMonitor.setContext(container.mainContext)
+                        backgroundTaskManager.updateQueueStatus(context: container.mainContext)
                         tripManager.modelContext = container.mainContext
-                        // Initial sync check if trips already exist in manager
                         tripManager.refreshTrips()
+                        locationManager.requestPermission()
                     }
                     .onOpenURL { url in
-                        print("🔗 Open URL: \(url)")
-                        if url.scheme == "pubo", let host = url.host, host == "task" {
+                        guard url.scheme == "pubo", let host = url.host else { return }
+                        if host == "task" {
                             let taskId = url.lastPathComponent
-                            print("📥 Received Task ID: \(taskId)")
-                            
-                            // 顯示懸浮處理 Box
-                            isProcessing = true
-                            readyImport = nil
-                            
-                            // 呼叫 DataService 抓取資料 (Polling)
-                            Task {
-                                if let (content, places) = await DataService.shared.pollTaskResult(taskId: taskId) {
-                                    // 成功抓取後，設定為 Ready 狀態，等待使用者點擊
-                                    await MainActor.run {
-                                        self.isProcessing = false
-                                        self.readyImport = PendingImport(content: content, places: places)
-                                    }
-                                } else {
-                                    // 失敗或超時
-                                    await MainActor.run {
-                                        self.isProcessing = false
-                                    }
-                                }
+                            dataService.resumeTask(taskId: taskId)
+                        } else if host == "join" {
+                            // pubo://join?code=738291
+                            if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                               let code = components.queryItems?.first(where: { $0.name == "code" })?.value {
+                                pendingJoinCode = code
                             }
                         }
                     }
-                    .sheet(item: $pendingImport) { data in
+                    .sheet(item: $dataService.pendingImport) { data in
                         ImportView(
                             content: data.content,
                             suggestedPlaces: data.places,
                             onConfirm: { selectedPlaces in
-                                // 使用者確認匯入
                                 Task {
                                     DataService.shared.saveContent(data.content, relatedPlaces: selectedPlaces)
-                                    self.pendingImport = nil
+                                    dataService.pendingImport = nil
                                 }
                             },
                             onCancel: {
-                                // 使用者取消
-                                self.pendingImport = nil
+                                dataService.pendingImport = nil
                             }
                         )
                     }
+                    .sheet(isPresented: $showTaskQueue) {
+                        TaskQueueSheet()
+                    }
                 
                 // 懸浮任務收件匣
-                if isProcessing || readyImport != nil {
+                let hasOfflineTasks = backgroundTaskManager.pendingTaskCount > 0 || backgroundTaskManager.activeTaskCount > 0
+                if dataService.isProcessingLink || dataService.readyImport != nil || hasOfflineTasks {
                     FloatingTaskInbox(
-                        isProcessing: isProcessing,
-                        hasResult: readyImport != nil,
+                        isProcessing: dataService.isProcessingLink || backgroundTaskManager.activeTaskCount > 0,
+                        progress: CGFloat(dataService.linkProgress),
+                        hasResult: dataService.readyImport != nil,
+                        pendingOfflineCount: backgroundTaskManager.pendingTaskCount,
                         onTap: {
-                            if let ready = readyImport {
-                                pendingImport = ready
-                                readyImport = nil
+                            if let ready = dataService.readyImport {
+                                dataService.pendingImport = ready
+                                dataService.readyImport = nil
+                            } else if hasOfflineTasks {
+                                showTaskQueue = true
                             }
                         }
                     )
-                    .zIndex(100) // 確保在最上層
+                    .zIndex(100)
+                }
+                
+                // 網路恢復 Toast
+                if networkMonitor.showRestoredToast {
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Image(systemName: "wifi")
+                            Text("網路已恢復，正在背景分析離線任務...")
+                        }
+                        .padding()
+                        .background(Color.black.opacity(0.8))
+                        .foregroundColor(.white)
+                        .cornerRadius(25)
+                        .padding(.bottom, 100)
+                    }
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .animation(.easeInOut, value: networkMonitor.showRestoredToast)
+                    .zIndex(200)
                 }
             }
         }
     }
-}
-
-// 用於 Sheet 顯示的 Wrapper
-struct PendingImport: Identifiable {
-    let id = UUID()
-    let content: Content
-    let places: [ContentPlaceInfo]
 }

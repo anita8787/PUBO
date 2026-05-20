@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
-import MapKit // Added for MKCoordinateRegion
+import MapKit
+import PhotosUI
 
 struct AddSpotSheet: View {
     @Environment(\.dismiss) var dismiss
@@ -89,8 +90,8 @@ struct AddSpotSheet: View {
                         .font(.system(size: 16))
                         .foregroundColor(.black)
                         .submitLabel(.search)
-                        .onChange(of: searchText) {
-                            searchService.updateQuery(searchText)
+                        .onChange(of: searchText) { old, newValue in
+                            searchService.updateQuery(newValue)
                         }
                         .onSubmit {
                             handleAddFromSearch(category: .spot)
@@ -288,6 +289,9 @@ struct SmartImportView: View {
     @State private var discoveredSpots: [ItinerarySpot] = [] // 識別出的景點
     @State private var selectedSpotIds: Set<String> = [] // 使用者選中的景點 ID
     
+    // Screenshot Upload State
+    @State private var selectedScreenshot: PhotosPickerItem? = nil
+    
     var body: some View {
         ZStack {
             Color.white.ignoresSafeArea()
@@ -359,13 +363,19 @@ struct SmartImportView: View {
             .padding(.horizontal)
             
             // Screenshot Import
-            Button(action: {}) {
+            PhotosPicker(selection: $selectedScreenshot, matching: .images, photoLibrary: .shared()) {
                 HStack {
-                    Image(systemName: "photo.on.rectangle")
-                        .font(.title)
-                        .foregroundColor(.black)
+                    if isProcessing {
+                        ProgressView()
+                            .tint(.black)
+                            .padding(.trailing, 4)
+                    } else {
+                        Image(systemName: "photo.on.rectangle")
+                            .font(.title)
+                            .foregroundColor(.black)
+                    }
                     VStack(alignment: .leading) {
-                        Text("截圖識別")
+                        Text(isProcessing ? "圖片辨識中..." : "截圖識別")
                             .font(.headline)
                             .foregroundColor(.black)
                     }
@@ -375,9 +385,79 @@ struct SmartImportView: View {
                 .background(Color.gray.opacity(0.1))
                 .cornerRadius(20)
             }
+            .disabled(isProcessing)
             .padding(.horizontal)
+            .onChange(of: selectedScreenshot) { old, newValue in
+                if let newValue {
+                    handleScreenshotUpload(item: newValue)
+                }
+            }
             
             Spacer()
+        }
+    }
+    
+    private func handleScreenshotUpload(item: PhotosPickerItem) {
+        isProcessing = true
+        errorMessage = nil
+        
+        Task {
+            do {
+                guard let data = try await item.loadTransferable(type: Data.self) else {
+                    throw NSError(domain: "PuboError", code: 0, userInfo: [NSLocalizedDescriptionKey: "無法讀取照片資料"])
+                }
+                
+                let result = try await DataService.shared.analyzeScreenshot(imageData: data)
+                
+                // 3. Save to Library (Collections)
+                DataService.shared.saveContent(result.0, relatedPlaces: result.1)
+                
+                // 4. Transform result to spots for preview
+                var spots: [ItinerarySpot] = []
+                for info in result.1 {
+                    let place = info.place
+                    var spot = ItinerarySpot.empty()
+                    spot.name = place.name
+                    spot.latitude = place.latitude
+                    spot.longitude = place.longitude
+                    spot.imageUrl = place.imageUrl
+                    spot.googlePlaceId = place.googlePlaceId
+                    
+                    spot.place = PlaceInfo(
+                        name: place.name,
+                        placeId: place.placeId,
+                        address: place.address,
+                        latitude: place.latitude,
+                        longitude: place.longitude,
+                        category: place.category,
+                        rating: place.rating,
+                        userRatingsTotal: place.userRatingCount,
+                        openingHours: nil,
+                        imageUrl: place.imageUrl
+                    )
+                    
+                    if let cat = place.category?.lowercased() {
+                        if cat.contains("food") { spot.category = .food }
+                        else if cat.contains("lodging") { spot.category = .accommodation }
+                        else { spot.category = .spot }
+                    }
+                    
+                    spots.append(spot)
+                }
+                
+                await MainActor.run {
+                    self.discoveredSpots = spots
+                    self.selectedSpotIds = Set(spots.map { $0.id })
+                    self.isProcessing = false
+                    self.selectedScreenshot = nil
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = "截圖辨識錯誤: \(error.localizedDescription)"
+                    self.isProcessing = false
+                    self.selectedScreenshot = nil
+                }
+            }
         }
     }
     
@@ -464,6 +544,13 @@ struct SmartImportView: View {
     private func handleSmartImport() {
         guard !linkText.isEmpty else { return }
         
+        // ⚡️ 快速防重複偵測 (ID + 標題)
+        if DataService.shared.isPostCollected(url: linkText) {
+            errorMessage = "這則貼文已經在收藏庫中囉！"
+            isProcessing = false
+            return
+        }
+        
         isProcessing = true
         errorMessage = nil
         
@@ -496,6 +583,7 @@ struct SmartImportView: View {
                     spot.name = place.name
                     spot.latitude = place.latitude
                     spot.longitude = place.longitude
+                    spot.imageUrl = place.imageUrl
                     spot.googlePlaceId = place.googlePlaceId
                     
                     // If coordinates are zero, try a quick repair with destination bias
@@ -518,7 +606,8 @@ struct SmartImportView: View {
                                     category: spot.category?.rawValue ?? "spot",
                                     rating: nil,
                                     userRatingsTotal: nil,
-                                    openingHours: nil
+                                    openingHours: nil,
+                                    imageUrl: nil
                                 )
                             }
                         } catch {
@@ -537,7 +626,8 @@ struct SmartImportView: View {
                             category: place.category,
                             rating: place.rating,
                             userRatingsTotal: place.userRatingCount,
-                            openingHours: nil
+                            openingHours: nil,
+                            imageUrl: nil
                         )
                     }
                     
@@ -620,8 +710,8 @@ struct AccommodationPopupView: View {
                         Image(systemName: "magnifyingglass")
                             .foregroundColor(.gray)
                         TextField("搜尋住宿飯店名稱", text: $text)
-                            .onChange(of: text) {
-                                searchService.updateQuery(text)
+                            .onChange(of: text) { old, newValue in
+                                searchService.updateQuery(newValue)
                             }
                         
                         if isFetchingDetails {
@@ -704,7 +794,8 @@ struct AccommodationPopupView: View {
                         category: "lodging",
                         rating: nil, 
                         userRatingsTotal: nil,
-                        openingHours: nil
+                        openingHours: nil,
+                        imageUrl: nil
                     )
                     
                     self.selectedSpot = spot
@@ -1044,7 +1135,8 @@ struct SavedPlacesResultView: View {
                                     category: place.category,
                                     rating: place.rating,
                                     userRatingsTotal: place.userRatingCount,
-                                    openingHours: openHours
+                                    openingHours: openHours,
+                                    imageUrl: place.contents.first?.previewThumbnailUrl
                                 )
                             } else {
                                 // Fallback if no opening hours (but we have rating)
@@ -1057,7 +1149,8 @@ struct SavedPlacesResultView: View {
                                     category: place.category,
                                     rating: place.rating,
                                     userRatingsTotal: place.userRatingCount,
-                                    openingHours: nil
+                                    openingHours: nil,
+                                    imageUrl: place.contents.first?.previewThumbnailUrl
                                 )
                             }
                             

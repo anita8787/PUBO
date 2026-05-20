@@ -10,7 +10,7 @@ class ApifyService:
         self.api_token = os.getenv("APIFY_API_TOKEN")
         self.client = ApifyClient(self.api_token) if self.api_token else None
 
-    def scrape_instagram_post(self, url: str) -> Optional[Dict[str, Any]]:
+    def extract_instagram_post(self, url: str) -> Optional[Dict[str, Any]]:
         """
         使用 Apify 官方最穩定且支援 URL 的 instagram-scraper
         """
@@ -162,14 +162,6 @@ class ApifyService:
             }
             print(f"DEBUG: Extraction Result: {result}")
             return result
-
-        except ValueError:
-            raise
-        except Exception as e:
-            print(f"Apify Threads Scrape Error: {e}")
-            raise Exception(f"SCRAPING_FAILED: {str(e)}")
-                
-            raise ValueError("THREADS_DATAproblem_PARSING_FAILED")
 
         except ValueError:
             raise

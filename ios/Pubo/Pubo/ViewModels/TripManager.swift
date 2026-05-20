@@ -12,6 +12,7 @@ class TripManager: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
     @Published var focusPlaceFromLibrary: SDPlace? = nil
+    @Published var selectedTripId: String? = nil
     
     // SwiftData Context (External injection)
     var modelContext: ModelContext?
@@ -35,11 +36,25 @@ class TripManager: ObservableObject {
         isLoading = true
         do {
             let fetchedTrips = try await DataService.shared.fetchTrips()
-            self.trips = fetchedTrips
+            // Fetch collaborated trips from SwiftData and merge them
+            var finalTrips = fetchedTrips
+            if let context = self.modelContext {
+                let allLocalDescriptor = FetchDescriptor<SDTrip>()
+                if let allLocal = try? context.fetch(allLocalDescriptor) {
+                    let backendIds = Set(fetchedTrips.map { $0.id })
+                    for local in allLocal {
+                        if !backendIds.contains(local.id), local.inviteCode != nil {
+                            finalTrips.append(local.toTrip())
+                        }
+                    }
+                }
+            }
+            
+            self.trips = finalTrips
             
             // Populate days dictionary for UI compatibility
             var newDays: [String: [ItineraryDay]] = [:]
-            for trip in fetchedTrips {
+            for trip in finalTrips {
                 if let tripDays = trip.days {
                     newDays[trip.id] = tripDays
                 }
@@ -48,7 +63,7 @@ class TripManager: ObservableObject {
             print("TripManager: Fetched \(trips.count) trips")
             
             // Phase 17: Sync to SwiftData for Offline Use
-            await syncToSwiftData(fetchedTrips)
+            await syncToSwiftData(finalTrips)
             
         } catch {
             print("TripManager: Fetch failed: \(error)")
@@ -205,6 +220,7 @@ class TripManager: ObservableObject {
         } catch {
             print("Add Accommodation Day Error: \(error)")
         }
+        self.triggerCollaborationSync(tripId: tripId)
     }
     
     func addSpot(to tripId: String, dayIndex: Int, spot: ItinerarySpot) {
@@ -255,6 +271,7 @@ class TripManager: ObservableObject {
             }
             // Auto-repair if coordinates are 0,0
             self.resolveInvalidCoordinates(in: tripId)
+            self.triggerCollaborationSync(tripId: tripId)
         }
     }
     
@@ -298,6 +315,7 @@ class TripManager: ObservableObject {
             if var currentDays = self.days[tripId], dayIndex < currentDays.count {
                 if let idx = currentDays[dayIndex].spots.firstIndex(where: { $0.id == spot.id }) {
                     currentDays[dayIndex].spots[idx] = spot
+                    self.objectWillChange.send() // Force SwiftUI to re-render immediately
                     self.days[tripId] = currentDays
                     
                     if let tIdx = self.trips.firstIndex(where: { $0.id == tripId }) {
@@ -387,11 +405,11 @@ class TripManager: ObservableObject {
         let endCoord = CLLocationCoordinate2D(latitude: end.lat, longitude: end.long)
         
         let request = MKDirections.Request()
-        let startLoc = CLLocation(latitude: startCoord.latitude, longitude: startCoord.longitude)
-        let endLoc = CLLocation(latitude: endCoord.latitude, longitude: endCoord.longitude)
+        let startPlacemark = MKPlacemark(coordinate: startCoord)
+        let endPlacemark = MKPlacemark(coordinate: endCoord)
         
-        request.source = MKMapItem(location: startLoc, address: nil)
-        request.destination = MKMapItem(location: endLoc, address: nil)
+        request.source = MKMapItem(placemark: startPlacemark)
+        request.destination = MKMapItem(placemark: endPlacemark)
         
         switch mode {
         case .walk: request.transportType = .walking
@@ -463,6 +481,8 @@ class TripManager: ObservableObject {
                 // Revert? For now just log.
             }
         }
+        
+        self.triggerCollaborationSync(tripId: tripId)
     }
     
     // Move to different day
@@ -552,6 +572,10 @@ class TripManager: ObservableObject {
     }
     
     func deleteTrip(id: String) {
+        // Save to trash before deleting
+        if let trip = trips.first(where: { $0.id == id }) {
+            TripTrashManager.shared.addToTrash(trip)
+        }
         Task {
             do {
                 try await DataService.shared.deleteTrip(id: id)
@@ -599,6 +623,9 @@ class TripManager: ObservableObject {
                 
                 if let index = trips.firstIndex(where: { $0.id == tripId }) {
                     trips[index] = updatedTrip
+                    if let newDays = updatedTrip.days {
+                        self.days[tripId] = newDays
+                    }
                 }
             } catch {
                 print("Update Dates Error: \(error)")
@@ -606,6 +633,8 @@ class TripManager: ObservableObject {
             }
             isLoading = false
         }
+        
+        self.triggerCollaborationSync(tripId: tripId)
     }
     
     // MARK: - Smart Sorting
@@ -668,8 +697,10 @@ class TripManager: ObservableObject {
         }
         
         // 3. Update Local & Backend
-        currentDays[dayIndex].spots = optimized
-        self.days[tripId] = currentDays
+        withAnimation {
+            currentDays[dayIndex].spots = optimized
+            self.days[tripId] = currentDays
+        }
         
         let dayDbId = currentDays[dayIndex].id
         let sortedSpotIds = optimized.map { $0.id }
@@ -694,9 +725,14 @@ class TripManager: ObservableObject {
         let dayId = String(currentDays[dayIndex].id)
         
         if let original = originalSpotsOrder[tripId]?[dayId] {
-            // Restore context
-            currentDays[dayIndex].spots = original
-            self.days[tripId] = currentDays
+            // Restore context locally first
+            withAnimation {
+                currentDays[dayIndex].spots = original
+                self.days[tripId] = currentDays
+            }
+            
+            // Clear backup immediately so UI un-sticks
+            originalSpotsOrder[tripId]?.removeValue(forKey: dayId)
             
             // Update Backend
             let dayDbId = currentDays[dayIndex].id
@@ -704,8 +740,6 @@ class TripManager: ObservableObject {
             
             do {
                 try await DataService.shared.reorderSpots(dayId: dayDbId, spotIds: sortedSpotIds)
-                // Clear backup after restore
-                originalSpotsOrder[tripId]?.removeValue(forKey: dayId)
             } catch {
                 print("Restore API Error: \(error)")
             }
@@ -822,6 +856,22 @@ class TripManager: ObservableObject {
         
         print("💾 [SwiftData] Starting sync for \(fetchedTrips.count) trips...")
         
+        // Phase 17.5: Pruning - Remove local trips that no longer exist on server
+        let fetchedIds = Set(fetchedTrips.map { $0.id })
+        let allLocalDescriptor = FetchDescriptor<SDTrip>()
+        if let allLocal = try? context.fetch(allLocalDescriptor) {
+            for local in allLocal {
+                if !fetchedIds.contains(local.id) {
+                    if local.inviteCode != nil {
+                        // Skip pruning collaborated trips
+                        continue
+                    }
+                    print("🗑️ [SwiftData] Pruning local zombie trip: \(local.id) (\(local.title))")
+                    context.delete(local)
+                }
+            }
+        }
+
         for trip in fetchedTrips {
             // Upsert Trip
             let tripId = trip.id
@@ -831,6 +881,12 @@ class TripManager: ObservableObject {
             let sdTrip: SDTrip
             
             if let existing = existingTrip {
+                // LWW (Last Write Wins) Conflict Resolution
+                if let serverUpdated = trip.updatedAt, existing.updatedAt > serverUpdated {
+                    print("🛡️ [LWW] Local trip \(trip.id) is newer. Skipping sync from server.")
+                    continue
+                }
+                
                 // Update basic fields
                 existing.title = trip.title
                 existing.destination = trip.destination
@@ -838,6 +894,9 @@ class TripManager: ObservableObject {
                 existing.endDate = trip.endDate
                 existing.coverImageUrl = trip.coverImageUrl
                 existing.transportMode = trip.transportMode
+                if let serverUpdated = trip.updatedAt {
+                    existing.updatedAt = serverUpdated
+                }
                 sdTrip = existing
             } else {
                 // Create new
@@ -864,6 +923,24 @@ class TripManager: ObservableObject {
             print("✅ [SwiftData] Sync successful!")
         } catch {
             print("❌ [SwiftData] Save error: \(error)")
+        }
+    }
+    
+    /// Triggers collaboration sync for a specific trip after local changes are made
+    func triggerCollaborationSync(tripId: String) {
+        Task {
+            // Ensure local memory state is synced to SwiftData first
+            await self.syncToSwiftData(self.trips)
+            
+            // Fetch the updated SDTrip and push to Firestore if it has an invite code
+            guard let context = self.modelContext else { return }
+            let fetchDescriptor = FetchDescriptor<SDTrip>(predicate: #Predicate { $0.id == tripId })
+            if let sdTrip = try? context.fetch(fetchDescriptor).first, sdTrip.inviteCode != nil {
+                let uid = AuthManager.shared.currentUID
+                sdTrip.lastUpdated = Date()
+                try? context.save()
+                await TripSyncManager.shared.pushLocalChanges(trip: sdTrip, ownerUID: uid)
+            }
         }
     }
     
@@ -906,5 +983,131 @@ class TripManager: ObservableObject {
                 context.insert(sdSpot)
             }
         }
+    }
+    
+    func importCuratedPostToLibrary(_ post: CuratedPost, selectedSpots: [PlaceInfo]) {
+        // 現在與 importCuratedPost 邏輯一致，未來若兩者有別可分開實作
+        importCuratedPost(post, selectedSpots: selectedSpots)
+    }
+    
+    func importCuratedPost(_ post: CuratedPost, selectedSpots: [PlaceInfo]) {
+        guard let context = modelContext else { 
+            print("❌ [TripManager] Import failed: modelContext is nil")
+            return 
+        }
+        
+        // ⚡️ 加強防守：即使按鈕沒擋住，底層也要擋住重複插入
+        if let url = post.sourceUrl, DataService.shared.isPostCollected(url: url, title: post.title) {
+            print("⚠️ [TripManager] Post already in library, skipping creation.")
+            return
+        }
+        
+        // 1. Create SDContent
+        let newContent = SDContent(
+            id: UUID().uuidString,
+            sourceType: "instagram",
+            sourceUrl: post.sourceUrl,
+            title: post.title,
+            text: post.title,
+            authorName: post.author,
+            authorAvatarUrl: nil,
+            previewThumbnailUrl: post.coverImageUrl,
+            publishedAt: nil,
+            unresolvedQueries: [],
+            userCategory: nil,
+            userNote: nil,
+            createdAt: Date()
+        )
+        
+        // 2. Create SDPlaces and link them
+        for spot in selectedSpots {
+            let sdPlace = SDPlace(
+                id: spot.placeId ?? UUID().uuidString,
+                name: spot.name ?? "未知地點",
+                address: spot.address,
+                latitude: spot.latitude ?? 0.0,
+                longitude: spot.longitude ?? 0.0,
+                category: spot.category,
+                rating: spot.rating,
+                userRatingCount: spot.userRatingsTotal,
+                openNow: nil,
+                confidenceScore: 1.0,
+                createdAt: Date(),
+                openingHours: nil
+            )
+            // Use relationship to link
+            sdPlace.contents.append(newContent)
+            newContent.places.append(sdPlace)
+            context.insert(sdPlace)
+        }
+        
+        context.insert(newContent)
+        
+        // ⚡️ 核心修復：立即通知 DataService 更新快取，確保 UI 愛心同步
+        if let url = post.sourceUrl {
+            DataService.shared.addToCache(url: url, title: post.title)
+        }
+        
+        do {
+            try context.save()
+            print("✅ [TripManager] Successfully imported curated post (\(selectedSpots.count) spots) to library")
+            self.objectWillChange.send()
+            
+            // 3. Sync to Cloud
+            if let url = post.sourceUrl {
+                let pIds = selectedSpots.compactMap { $0.placeId }
+                Task {
+                    await DataService.shared.syncCollectionWithPlaces(url: url, placeIds: pIds)
+                }
+            }
+        } catch {
+            print("❌ [TripManager] SwiftData save error: \(error)")
+        }
+    }
+}
+
+// MARK: - SDTrip to Trip Extension
+extension SDTrip {
+    func toTrip() -> Trip {
+        Trip(
+            id: self.id,
+            title: self.title,
+            destination: self.destination,
+            startDate: self.startDate,
+            endDate: self.endDate,
+            coverImageUrl: self.coverImageUrl,
+            transportMode: self.transportMode,
+            updatedAt: self.lastUpdated,
+            inviteCode: self.inviteCode,
+            days: self.days.map { sdDay in
+                ItineraryDay(
+                    id: sdDay.id,
+                    dayOrder: sdDay.dayOrder,
+                    date: sdDay.date,
+                    weekday: sdDay.weekday,
+                    title: sdDay.title,
+                    spots: sdDay.spots.map { sdSpot in
+                        ItinerarySpot(
+                            id: sdSpot.id,
+                            dayId: sdDay.id,
+                            name: sdSpot.name,
+                            category: SpotCategory(rawValue: sdSpot.category?.lowercased() ?? "spot") ?? .spot,
+                            startTime: sdSpot.startTime,
+                            stayDuration: sdSpot.stayDuration,
+                            notes: sdSpot.notes,
+                            imageUrl: sdSpot.imageUrl,
+                            placeId: nil,
+                            googlePlaceId: sdSpot.googlePlaceId,
+                            latitude: sdSpot.latitude,
+                            longitude: sdSpot.longitude,
+                            sortOrder: sdSpot.sortOrder,
+                            travelMode: TransportType(rawValue: sdSpot.travelMode?.lowercased() ?? "train") ?? .train,
+                            travelTime: sdSpot.travelTime,
+                            travelDistance: sdSpot.travelDistance
+                        )
+                    }.sorted(by: { ($0.sortOrder ?? 0) < ($1.sortOrder ?? 0) })
+                )
+            }.sorted(by: { ($0.dayOrder ?? 0) < ($1.dayOrder ?? 0) })
+        )
     }
 }

@@ -13,6 +13,7 @@ struct PuboColors {
     static let cardOrange = Color.orange 
     static let cardRed = Color(hex: "FF6B6B") 
     static let cardBlue = Color(hex: "4D96FF") 
+    static let pollutedGreen = Color(hex: "38B3BA") // User-specified green
 }
 
 struct PuboStyles {
@@ -23,13 +24,64 @@ struct PuboStyles {
 }
 
 // MARK: - Shapes
-struct RoundedCorner: Shape {
+struct RoundedCorner: InsettableShape {
     var radius: CGFloat = .infinity
     var corners: UIRectCorner = .allCorners
+    var insetAmount: CGFloat = 0
     
     func path(in rect: CGRect) -> Path {
-        let path = UIBezierPath(roundedRect: rect, byRoundingCorners: corners, cornerRadii: CGSize(width: radius, height: radius))
+        let insetRect = rect.insetBy(dx: insetAmount, dy: insetAmount)
+        let adjustedRadius = max(0, radius - insetAmount)
+        let path = UIBezierPath(roundedRect: insetRect, byRoundingCorners: corners, cornerRadii: CGSize(width: adjustedRadius, height: adjustedRadius))
         return Path(path.cgPath)
+    }
+    
+    func inset(by amount: CGFloat) -> some InsettableShape {
+        var result = self
+        result.insetAmount += amount
+        return result
+    }
+}
+
+/// A specific shape for drawers/sheets that only draws the top and sides, staying open at the bottom.
+struct SheetBorder: InsettableShape {
+    var radius: CGFloat
+    var insetAmount: CGFloat = 0
+    
+    func path(in rect: CGRect) -> Path {
+        let x = rect.minX + insetAmount
+        let y = rect.minY + insetAmount
+        let rad = max(0, radius - insetAmount)
+        
+        var path = Path()
+        // Start from bottom left (beyond visible area)
+        path.move(to: CGPoint(x: x, y: rect.maxY + 10)) 
+        // Line up to start of top-left curve
+        path.addLine(to: CGPoint(x: x, y: y + rad))
+        // Top-left curve
+        path.addArc(center: CGPoint(x: x + rad, y: y + rad),
+                    radius: rad,
+                    startAngle: Angle(degrees: 180),
+                    endAngle: Angle(degrees: 270),
+                    clockwise: false)
+        // Top line
+        path.addLine(to: CGPoint(x: rect.maxX - insetAmount - rad, y: y))
+        // Top-right curve
+        path.addArc(center: CGPoint(x: rect.maxX - insetAmount - rad, y: y + rad),
+                    radius: rad,
+                    startAngle: Angle(degrees: 270),
+                    endAngle: Angle(degrees: 0),
+                    clockwise: false)
+        // Line down to bottom right (beyond visible area)
+        path.addLine(to: CGPoint(x: rect.maxX - insetAmount, y: rect.maxY + 10))
+        
+        return path
+    }
+    
+    func inset(by amount: CGFloat) -> some InsettableShape {
+        var result = self
+        result.insetAmount += amount
+        return result
     }
 }
 

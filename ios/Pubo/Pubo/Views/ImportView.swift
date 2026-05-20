@@ -8,6 +8,9 @@ struct ImportView: View {
     var onCancel: () -> Void
     
     @State private var selectedPlaceIds: Set<String> = []
+    @State private var isPromoting = false
+    @State private var showingPromoteAlert = false
+    @State private var promoteMessage = ""
     
     // 初始化時預設全選
     init(content: Content, suggestedPlaces: [ContentPlaceInfo], onConfirm: @escaping ([ContentPlaceInfo]) -> Void, onCancel: @escaping () -> Void) {
@@ -24,45 +27,46 @@ struct ImportView: View {
             List {
                 // Section 1: 內容摘要 (卡片式設計)
                 Section {
-                    VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .bottom, spacing: 14) {
+                        // 左側：貼文原圖（保持原比例）
                         if let urlStr = content.previewThumbnailUrl, let url = URL(string: urlStr) {
                             AsyncImage(url: url) { image in
                                 image
                                     .resizable()
-                                    .aspectRatio(contentMode: .fill)
-                                    .frame(height: 180)
-                                    .clipped()
-                                    .cornerRadius(12)
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(width: 110)
+                                    .cornerRadius(10)
                             } placeholder: {
-                                Rectangle()
-                                    .fill(Color.gray.opacity(0.2))
-                                    .frame(height: 180)
-                                    .cornerRadius(12)
+                                RoundedRectangle(cornerRadius: 10)
+                                    .fill(Color.gray.opacity(0.15))
+                                    .frame(width: 110, height: 140)
                             }
                         }
                         
-                        Text(content.title ?? "未命名內容")
-                            .font(.headline)
-                            .lineLimit(2)
-                        
-                        if let author = content.authorName {
-                            HStack {
-                                Image(systemName: "person.circle.fill")
-                                    .foregroundColor(.gray)
-                                Text(author)
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
+                        // 右側：文字資訊
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(content.title ?? "未命名內容")
+                                .font(.headline)
+                                .lineLimit(2)
+                            
+                            if let author = content.authorName {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "person.circle.fill")
+                                        .foregroundColor(.gray)
+                                        .font(.subheadline)
+                                    Text(author)
+                                        .font(.subheadline)
+                                        .foregroundColor(.secondary)
+                                }
                             }
+                            
+                            Text(content.text ?? "")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .lineLimit(4)
                         }
-                        
-                        Text(content.text ?? "")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .lineLimit(3)
                     }
                     .padding(.vertical, 8)
-                } header: {
-                    Text("來自 \(content.sourceType.rawValue.capitalized) 的分享")
                 }
                 
                 // Section 2: 地點清單
@@ -158,6 +162,39 @@ struct ImportView: View {
                         onCancel()
                     }
                 }
+                
+                ToolbarItem(placement: .principal) {
+                    Button(action: {
+                        isPromoting = true
+                        Task {
+                            do {
+                                let selected = suggestedPlaces.filter { selectedPlaceIds.contains($0.place.placeId) }
+                                try await DataService.shared.promoteToCurated(content: content, places: selected)
+                                await MainActor.run {
+                                    promoteMessage = "✅ 成功加入推薦行程！"
+                                    showingPromoteAlert = true
+                                    isPromoting = false
+                                }
+                            } catch {
+                                await MainActor.run {
+                                    promoteMessage = "❌ 失敗：\(error.localizedDescription)"
+                                    showingPromoteAlert = true
+                                    isPromoting = false
+                                }
+                            }
+                        }
+                    }) {
+                        if isPromoting {
+                            ProgressView().scaleEffect(0.8)
+                        } else {
+                            Text("👑 設為推薦")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(.orange)
+                        }
+                    }
+                    .disabled(selectedPlaceIds.isEmpty || isPromoting)
+                }
+                
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("匯入 (\(selectedPlaceIds.count))") {
                         let selected = suggestedPlaces.filter { selectedPlaceIds.contains($0.place.placeId) }
@@ -165,6 +202,9 @@ struct ImportView: View {
                     }
                     .disabled(selectedPlaceIds.isEmpty)
                 }
+            }
+            .alert(isPresented: $showingPromoteAlert) {
+                Alert(title: Text("推薦行程"), message: Text(promoteMessage), dismissButton: .default(Text("好的")))
             }
         }
     }

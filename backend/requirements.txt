@@ -1,5 +1,6 @@
 fastapi
 uvicorn
+firebase-admin
 sqlalchemy
 pydantic
 pydantic-settings
@@ -14,4 +15,5 @@ python-dotenv
 google-generativeai
 yt-dlp
 youtube-transcript-api
-
+supabase
+psycopg2-binary

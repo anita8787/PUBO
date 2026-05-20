@@ -35,11 +35,11 @@ class ItineraryService {
         let request = MKDirections.Request()
         // MKMapItem(placemark:) is the standard API. The warning about 'MKPlacemark' deprecation in iOS 26 is future-proofing.
         // We continue to use it as it's the correct way to create MapItems from coordinates in current iOS versions.
-        let startLoc = CLLocation(latitude: start.coordinate.latitude, longitude: start.coordinate.longitude)
-        let endLoc = CLLocation(latitude: end.coordinate.latitude, longitude: end.coordinate.longitude)
+        let startPlacemark = MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: start.coordinate.latitude, longitude: start.coordinate.longitude))
+        let endPlacemark = MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: end.coordinate.latitude, longitude: end.coordinate.longitude))
         
-        request.source = MKMapItem(location: startLoc, address: nil)
-        request.destination = MKMapItem(location: endLoc, address: nil)
+        request.source = MKMapItem(placemark: startPlacemark)
+        request.destination = MKMapItem(placemark: endPlacemark)
         request.transportType = transportType
         
         let directions = MKDirections(request: request)

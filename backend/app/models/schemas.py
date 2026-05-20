@@ -23,6 +23,9 @@ class PlaceBase(BaseModel):
     opening_hours: Optional[Dict[str, Any]] = None
     open_now: Optional[bool] = None
     image_url: Optional[str] = None # 新增：景點圖片 URL
+    
+    class Config:
+        from_attributes = True
 
 class PlaceCreate(PlaceBase):
     pass
@@ -62,7 +65,10 @@ class ContentResponse(ContentBase):
     class Config:
         from_attributes = True
 
-# --- API Interaction Schemas ---
+class CollectionRequest(BaseModel):
+    url: str
+    place_ids: Optional[List[str]] = []
+
 class ShareRequest(BaseModel):
     url: str
 
@@ -73,6 +79,7 @@ class ExtractionResponse(BaseModel):
 class TaskResponse(BaseModel):
     task_id: str
     status: TaskStatus
+    progress: float = 0.0
     result: Optional[ExtractionResponse] = None
     error: Optional[str] = None
 
@@ -81,6 +88,8 @@ class AnalyzeRequest(BaseModel):
     name: str
     address: Optional[str] = None
     category: Optional[str] = None
+    country: Optional[str] = None
+    city: Optional[str] = None
 
 class AnalyzeResponse(BaseModel):
     description: str
@@ -172,6 +181,26 @@ class TripResponse(TripBase):
     created_at: datetime
     updated_at: datetime
     days: List[DayResponse] = []
+
+    class Config:
+        from_attributes = True
+
+# --- Curated Post Schemas ---
+class CuratedPostBase(BaseModel):
+    title: str
+    cover_image: Optional[str] = None
+    author: Optional[str] = None
+    source_url: str
+    spots: List[Dict[str, Any]] = []
+    spot_count: int = 0
+    country: Optional[str] = None
+
+class CuratedPostCreate(CuratedPostBase):
+    pass
+
+class CuratedPostResponse(CuratedPostBase):
+    id: str
+    created_at: datetime
 
     class Config:
         from_attributes = True

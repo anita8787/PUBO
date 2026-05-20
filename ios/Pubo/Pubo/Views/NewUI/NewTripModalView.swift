@@ -3,12 +3,12 @@ import SwiftUI
 struct NewTripModalView: View {
     @Binding var isPresented: Bool
     var onCreateTrip: ((String, String, Date, Date) -> Void)?
+    var onJoinClick: (() -> Void)?
     
     @State private var tripName: String = ""
     @State private var destination: String = ""
     @State private var startDate = Date()
     @State private var endDate = Date()
-    @State private var isShared: Bool = false
     
     var body: some View {
         ZStack {
@@ -126,32 +126,36 @@ struct NewTripModalView: View {
                         }
                     }
                     
-                    // Invite Friends
-                    HStack(spacing: 8) {
-                        Image(systemName: "person.2.fill")
-                            .font(.system(size: 13))
-                            .foregroundColor(PuboColors.navy)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("邀請好友共同編輯")
-                                .font(.system(size: 12, weight: .bold))
+                    // Join Friends Trip Button
+                    Button(action: {
+                        isPresented = false
+                        onJoinClick?()
+                    }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "person.2.fill")
+                                .font(.system(size: 13))
                                 .foregroundColor(PuboColors.navy)
-                            Text("與旅伴一起規劃行程")
-                                .font(.system(size: 10))
-                                .foregroundColor(.gray)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("加入好友的行程")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .foregroundColor(PuboColors.navy)
+                                Text("點擊輸入邀請碼")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.gray)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(PuboColors.navy.opacity(0.5))
                         }
-                        Spacer()
-                        Toggle("", isOn: $isShared)
-                            .labelsHidden()
-                            .tint(PuboColors.navy)
-                            .scaleEffect(0.75)
+                        .padding(10)
+                        .background(PuboColors.background)
+                        .cornerRadius(10)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(Color.gray.opacity(0.3), style: StrokeStyle(lineWidth: 1, dash: [4]))
+                        )
                     }
-                    .padding(10)
-                    .background(PuboColors.background)
-                    .cornerRadius(10)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color.gray.opacity(0.3), style: StrokeStyle(lineWidth: 1, dash: [4]))
-                    )
                 }
                 .padding(.bottom, 16)
                 

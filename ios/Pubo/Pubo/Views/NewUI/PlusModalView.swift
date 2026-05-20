@@ -8,13 +8,24 @@ struct PlusModalView: View {
     var onOpenLibrary: () -> Void
     var onCustom: () -> Void
     
+    @ObservedObject var dataService = DataService.shared
+    
     @State private var linkText = ""
-    @State private var isProcessing = false
     @State private var isExpanded = false
     @State private var errorMessage: String? = nil
     
+    private var isURL: Bool {
+        linkText.lowercased().hasPrefix("http")
+    }
+    
+    // Selection state
+    @State private var parsedContent: Content? = nil
+    @State private var discoveredPlaces: [ContentPlaceInfo] = []
+    @State private var selectedPlaceIds: Set<String> = []
+    
     // Photo Picker State
     @State private var selectedItem: PhotosPickerItem? = nil
+    @State private var isProcessingScreenshot = false
     
     var body: some View {
         ZStack {
@@ -32,8 +43,7 @@ struct PlusModalView: View {
                 Spacer()
                 
                 VStack(spacing: 16) {
-                    
-                    // 1. 連結識別卡片
+                    // 1. 連結識別卡片 (支持連結與文本)
                     VStack(alignment: .leading, spacing: 12) {
                         HStack(alignment: .center) {
                             Image(systemName: "link")
@@ -50,9 +60,9 @@ struct PlusModalView: View {
                         
                         // 輸入框與按鈕
                         VStack(spacing: 12) {
-                            TextField("貼上社群貼文或影片連結，即可幫你辨識出文章所提及的景點等", text: $linkText, axis: .vertical)
+                            TextField("貼上社群貼文、影片連結，或直接輸入景點清單/文章文本，即可幫你辨識景點...", text: $linkText, axis: .vertical)
                                 .font(.system(size: 13))
-                                .lineLimit(3...5)
+                                .lineLimit(3...8)
                                 .padding(12)
                                 .frame(minHeight: 80, alignment: .topLeading)
                                 .background(Color.gray.opacity(0.1))
@@ -71,19 +81,19 @@ struct PlusModalView: View {
                                 Spacer()
                                 Button(action: handleSmartImport) {
                                     HStack {
-                                        if isProcessing {
+                                        if dataService.isProcessingLink {
                                             ProgressView().tint(.white).padding(.trailing, 2)
                                         }
-                                        Text(isProcessing ? "識別中..." : "開始識別")
+                                        Text(dataService.isProcessingLink ? "識別中... \(Int(dataService.linkProgress * 100))%" : "開始識別")
                                             .font(.system(size: 12, weight: .bold))
                                             .foregroundColor(.white)
                                     }
                                     .padding(.horizontal, 16)
                                     .padding(.vertical, 8)
-                                    .background(linkText.isEmpty ? Color.gray : PuboColors.navy)
+                                    .background(linkText.isEmpty || dataService.isProcessingLink ? Color.gray : PuboColors.navy)
                                     .cornerRadius(16)
                                 }
-                                .disabled(isProcessing || linkText.isEmpty)
+                                .disabled(dataService.isProcessingLink || linkText.isEmpty)
                             }
                         }
                     }
@@ -94,11 +104,15 @@ struct PlusModalView: View {
                     // 2. 截圖識別卡片
                     PhotosPicker(selection: $selectedItem, matching: .images, photoLibrary: .shared()) {
                         HStack(spacing: 12) {
-                            Image(systemName: "photo.on.rectangle")
-                                .font(.system(size: 20, weight: .bold))
-                                .foregroundColor(.black)
+                            if isProcessingScreenshot {
+                                ProgressView().tint(.black)
+                            } else {
+                                Image(systemName: "photo.on.rectangle")
+                                    .font(.system(size: 20, weight: .bold))
+                                    .foregroundColor(.black)
+                            }
                             
-                            Text("截圖識別")
+                            Text(isProcessingScreenshot ? "圖片辨識中..." : "截圖識別")
                                 .font(.system(size: 16, weight: .bold))
                                 .foregroundColor(.black)
                             Spacer()
@@ -107,11 +121,10 @@ struct PlusModalView: View {
                         .background(Color(hex: "E5F0FF")) // 淺藍色背景
                         .cornerRadius(24)
                     }
+                    .disabled(isProcessingScreenshot)
                     .onChange(of: selectedItem) { _, newItem in
-                        if newItem != nil {
-                            // TODO: Call API for Image OCR when backend is ready!
-                            errorMessage = "截圖辨識功能即將推出！"
-                            selectedItem = nil // Reset picking state
+                        if let newItem = newItem {
+                            handleScreenshotUpload(item: newItem)
                         }
                     }
                     
@@ -132,40 +145,54 @@ struct PlusModalView: View {
                 .padding(.bottom, 24)
             }
         }
+        .onChange(of: dataService.readyImport != nil) { _, hasResult in
+            if hasResult {
+                withAnimation {
+                    isPresented = false
+                }
+                if let ready = dataService.readyImport {
+                    dataService.pendingImport = ready
+                    dataService.readyImport = nil
+                }
+            }
+        }
     }
     
     private func handleSmartImport() {
         guard !linkText.isEmpty else { return }
-        
-        isProcessing = true
+
+        // 先查收藏庫：若連結已收藏，直接顯示提示，不觸發後端 AI 分析
+        if DataService.shared.isPostCollected(url: linkText) {
+            errorMessage = "✅ 這則貼文已在你的收藏庫中，不需要重複收藏。"
+            return
+        }
+
+        errorMessage = nil
+        DataService.shared.startSmartImport(url: linkText)
+    }
+    
+    private func handleScreenshotUpload(item: PhotosPickerItem) {
+        isProcessingScreenshot = true
         errorMessage = nil
         
         Task {
             do {
-                let taskId = try await DataService.shared.submitShareTask(url: linkText)
-                
-                guard let result = await DataService.shared.pollTaskResult(taskId: taskId) else {
-                    await MainActor.run {
-                        self.errorMessage = "識別超時或失敗，請檢查連結"
-                        self.isProcessing = false
-                    }
-                    return
+                guard let data = try await item.loadTransferable(type: Data.self) else {
+                    throw NSError(domain: "PuboError", code: 0, userInfo: [NSLocalizedDescriptionKey: "無法讀取照片資料"])
                 }
                 
-                // Save directly to the user's Library (Collections)
-                DataService.shared.saveContent(result.0, relatedPlaces: result.1)
+                let result = try await DataService.shared.analyzeScreenshot(imageData: data)
                 
                 await MainActor.run {
-                    self.isProcessing = false
-                    self.linkText = ""
-                    // Dismiss on success
-                    withAnimation { isPresented = false }
-                    // Notice: Users can now see this in their collection library!
+                    self.isProcessingScreenshot = false
+                    self.selectedItem = nil
+                    DataService.shared.readyImport = PendingImport(content: result.0, places: result.1)
                 }
             } catch {
                 await MainActor.run {
-                    self.errorMessage = "解析錯誤: \(error.localizedDescription)"
-                    self.isProcessing = false
+                    self.errorMessage = "截圖辨識錯誤: \(error.localizedDescription)"
+                    self.isProcessingScreenshot = false
+                    self.selectedItem = nil
                 }
             }
         }

@@ -1,0 +1,15 @@
+fastapi
+mangum
+firebase-functions
+firebase-admin
+google-generativeai
+requests
+apify-client
+sqlalchemy
+psycopg2-binary
+pydantic
+python-multipart
+python-dotenv
+supabase
+yt-dlp
+youtube-transcript-api

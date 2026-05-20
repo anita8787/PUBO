@@ -1,16 +1,15 @@
 {
-    "images": [
-        {
-            "filename": "replace-spot.svg",
-            "idiom": "universal"
-        }
-    ],
-    "info": {
-        "author": "xcode",
-        "version": 1
-    },
-    "properties": {
-        "preserves-vector-representation": true,
-        "template-rendering-intent": "original"
+  "images" : [
+    {
+      "idiom" : "universal",
+      "filename" : "replace-spot.svg"
     }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  },
+  "properties" : {
+    "preserves-vector-representation" : true
+  }
 }

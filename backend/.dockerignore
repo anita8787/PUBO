@@ -1,0 +1,40 @@
+# Git
+.git
+.gitignore
+
+# Python
+venv/
+functions/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# 環境變數（機密，不進 image）
+.env
+.env.*
+firebase-key.json
+
+# 開發測試檔
+*.log
+*.pid
+*.db
+test_*.py
+debug_*.py
+output.txt
+response.json
+
+# Firebase
+.firebaserc
+firebase.json
+firebase-debug.log
+functions/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

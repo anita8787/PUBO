@@ -7,6 +7,45 @@ protocol SearchProvider {
     func fetchDetails(placeId: String) async throws -> (lat: Double, lng: Double, address: String?)
 }
 
+// MARK: - Places Search Cache (In-Memory, Process Lifetime)
+final class PlacesSearchCache {
+    static let shared = PlacesSearchCache()
+    private init() {}
+
+    // Autocomplete cache: query → results
+    private var autocompleteCache: [String: (results: [SearchResult], timestamp: Date)] = [:]
+    // Details cache: placeId → details
+    private var detailsCache: [String: (lat: Double, lng: Double, address: String?, timestamp: Date)] = [:]
+
+    private let ttl: TimeInterval = 300 // 5 分鐘有效
+
+    func cachedSuggestions(for key: String) -> [SearchResult]? {
+        guard let entry = autocompleteCache[key],
+              Date().timeIntervalSince(entry.timestamp) < ttl else { return nil }
+        return entry.results
+    }
+
+    func cacheSuggestions(_ results: [SearchResult], for key: String) {
+        autocompleteCache[key] = (results: results, timestamp: Date())
+    }
+
+    func cachedDetails(for placeId: String) -> (lat: Double, lng: Double, address: String?)? {
+        guard let entry = detailsCache[placeId],
+              Date().timeIntervalSince(entry.timestamp) < ttl else { return nil }
+        return (lat: entry.lat, lng: entry.lng, address: entry.address)
+    }
+
+    func cacheDetails(lat: Double, lng: Double, address: String?, for placeId: String) {
+        detailsCache[placeId] = (lat: lat, lng: lng, address: address, timestamp: Date())
+    }
+
+    func clearAll() {
+        autocompleteCache.removeAll()
+        detailsCache.removeAll()
+        print("🧹 [PlacesCache] Cleared all cache entries.")
+    }
+}
+
 class SearchService: ObservableObject {
     @Published var suggestions: [SearchResult] = []
     @Published var isSearching = false
@@ -51,17 +90,30 @@ class SearchService: ObservableObject {
     
     @MainActor
     private func performSearch(query: String) async {
+        // 先查快取
+        let cacheKey = "\(query)|\(regionCode ?? "")"
+        if let cached = PlacesSearchCache.shared.cachedSuggestions(for: cacheKey) {
+            print("⚡️ [PlacesCache] Cache hit for query: \(query)")
+            self.suggestions = cached
+            return
+        }
+
         isSearching = true
         defer { isSearching = false }
         
         do {
             // Priority 1: Google
-            suggestions = try await googleProvider.autocomplete(query: query, regionCode: regionCode, sessionToken: sessionToken)
+            let results = try await googleProvider.autocomplete(query: query, regionCode: regionCode, sessionToken: sessionToken)
+            self.suggestions = results
+            PlacesSearchCache.shared.cacheSuggestions(results, for: cacheKey)
+            print("✅ [PlacesCache] Cached \(results.count) results for: \(query)")
         } catch {
             print("⚠️ Google Search Failed: \(error). Falling back to MapKit.")
             do {
                 // Priority 2: MapKit Fallback
-                suggestions = try await mkProvider.autocomplete(query: query, regionCode: regionCode, sessionToken: sessionToken)
+                let results = try await mkProvider.autocomplete(query: query, regionCode: regionCode, sessionToken: sessionToken)
+                self.suggestions = results
+                PlacesSearchCache.shared.cacheSuggestions(results, for: cacheKey)
             } catch {
                 print("❌ MapKit Search also failed: \(error)")
                 suggestions = []
@@ -70,12 +122,23 @@ class SearchService: ObservableObject {
     }
     
     func getDetails(for result: SearchResult) async throws -> (lat: Double, lng: Double, address: String?) {
+        // 先查快取
+        if let cached = PlacesSearchCache.shared.cachedDetails(for: result.placeId) {
+            print("⚡️ [PlacesCache] Details cache hit for placeId: \(result.placeId)")
+            return cached
+        }
+
+        let details: (lat: Double, lng: Double, address: String?)
         switch result.source {
         case .google:
-            return try await googleProvider.fetchDetails(placeId: result.placeId)
+            details = try await googleProvider.fetchDetails(placeId: result.placeId)
         case .apple:
-            return try await mkProvider.fetchDetails(placeId: result.placeId)
+            details = try await mkProvider.fetchDetails(placeId: result.placeId)
         }
+
+        PlacesSearchCache.shared.cacheDetails(lat: details.lat, lng: details.lng, address: details.address, for: result.placeId)
+        print("✅ [PlacesCache] Cached details for placeId: \(result.placeId)")
+        return details
     }
 }
 
@@ -162,7 +225,7 @@ class MapKitProvider: NSObject, SearchProvider, MKLocalSearchCompleterDelegate {
         let response = try await search.start()
         
         guard let item = response.mapItems.first else { throw URLError(.fileDoesNotExist) }
-        return (lat: item.location.coordinate.latitude, lng: item.location.coordinate.longitude, address: item.name)
+        return (lat: item.placemark.coordinate.latitude, lng: item.placemark.coordinate.longitude, address: item.name)
     }
     
     // MKLocalSearchCompleterDelegate
