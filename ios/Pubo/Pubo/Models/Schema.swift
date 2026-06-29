@@ -18,6 +18,8 @@ final class SDPlace {
     var openingHours: String? // JSON String of OpenHours
     var imageUrl: String?
     var googlePlaceId: String?
+    var isSaved: Bool = true
+    var sourceUrl: String?
     
     // Relationships
     @Relationship(deleteRule: .nullify, inverse: \SDContent.places)
@@ -38,7 +40,8 @@ final class SDPlace {
         updatedAt: Date = Date(),
         openingHours: String? = nil,
         imageUrl: String? = nil,
-        googlePlaceId: String? = nil
+        googlePlaceId: String? = nil,
+        isSaved: Bool = true
     ) {
         self.id = id
         self.name = name
@@ -55,6 +58,7 @@ final class SDPlace {
         self.openingHours = openingHours
         self.imageUrl = imageUrl
         self.googlePlaceId = googlePlaceId
+        self.isSaved = isSaved
     }
 }
 

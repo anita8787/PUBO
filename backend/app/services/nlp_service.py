@@ -21,6 +21,30 @@ class NLPService:
         # REST API 基礎 URL
         self.base_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent"
 
+    def _clean_social_media_text(self, text: str) -> str:
+        """
+        在發送給 Gemini 前，先在後台強行過濾雜訊，大幅節省 Token 並提升解析速度。
+        """
+        if not text:
+            return ""
+        import re
+        
+        # 1. 移除所有網址 (http, https, bit.ly 等)
+        text = re.sub(r'http[s]?://\S+', '', text)
+        text = re.sub(r'bit\.ly/\S+', '', text)
+        
+        # 2. 移除 # 符號，但保留後面的文字 (例如 #九份 -> 九份)
+        text = re.sub(r'#', '', text)
+        
+        # 3. 移除常見廢話 (可依據需求擴充)
+        fluff = ["快點標註朋友帶你去", "點擊首頁連結", "客觀評價高達五顆星"]
+        for f in fluff:
+            text = text.replace(f, "")
+            
+        # 4. 移除過多的空白與換行
+        text = re.sub(r'\n+', '\n', text)
+        return text.strip()
+
     def extract_places_from_text(self, text: str) -> List[Dict[str, Any]]:
         """
         使用 Google Gemini REST API 從文字中抽取出 POI 地點
@@ -29,7 +53,9 @@ class NLPService:
             print("Warning: GEMINI_API_KEY not set. Returning empty list.")
             return []
 
-        prompt = self._build_extraction_prompt(text)
+        # 在發送給 AI 前，先極速清洗文本
+        cleaned_text = self._clean_social_media_text(text)
+        prompt = self._build_extraction_prompt(cleaned_text)
         
         # 設定正確的 Header
         headers = {
@@ -47,7 +73,21 @@ class NLPService:
                 }
             ],
             "generationConfig": {
-                "responseMimeType": "application/json"
+                "responseMimeType": "application/json",
+                "responseSchema": {
+                    "type": "ARRAY",
+                    "description": "List of extracted places",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "spot_name": {"type": "STRING", "description": "The name of the place, spot, or store"},
+                            "city": {"type": "STRING", "description": "The city or region"},
+                            "address": {"type": "STRING", "description": "The full address of the place, if mentioned in the text"},
+                            "category": {"type": "STRING", "description": "Category (美食, 景點, 住宿, 購物)"}
+                        },
+                        "required": ["spot_name"]
+                    }
+                }
             }
         }
 
@@ -78,159 +118,6 @@ class NLPService:
             print(f"❌ [NLP] REST API Request Failed: {e}")
             return self._fallback_regex_extraction(text)
 
-    def extract_places_from_image(self, image_data: bytes, mime_type: str) -> List[Dict[str, Any]]:
-        """
-        使用 Google Gemini REST API 從圖片(截圖)中抽取出 POI 地點
-        """
-        import base64
-        if not self.api_key:
-            print("Warning: GEMINI_API_KEY not set. Returning empty list.")
-            return []
-
-        # 圖片需轉為 Base64 才能透過 REST API 傳遞
-        base64_image = base64.b64encode(image_data).decode('utf-8')
-        
-        prompt = self._build_extraction_prompt("這是一張包含景點、餐廳或店家的截圖，請分析圖片中的文字與地標。")
-        
-        headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": self.api_key
-        }
-        
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": prompt},
-                        {
-                            "inlineData": {
-                                "mimeType": mime_type,
-                                "data": base64_image
-                            }
-                        }
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "responseMimeType": "application/json"
-            }
-        }
-
-        try:
-            print(f"🖼️ [NLP] Calling Gemini REST API ({self.model_name}) for Image Extraction...")
-            response = requests.post(self.base_url, headers=headers, json=payload, timeout=45)
-            
-            if response.status_code != 200:
-                print(f"❌ [NLP] API Error ({response.status_code}): {response.text}")
-                return []
-                
-            result = response.json()
-            if "candidates" in result and len(result["candidates"]) > 0:
-                candidate = result["candidates"][0]
-                if "content" in candidate and "parts" in candidate["content"]:
-                    content_text = candidate["content"]["parts"][0]["text"].strip()
-                    content_text = content_text.replace('```json', '').replace('```', '').strip()
-                    print(f"🤖 [NLP] AI Image Raw Response: {content_text}")
-                    return self._parse_extraction_response(content_text)
-            
-            return []
-
-        except Exception as e:
-            print(f"❌ [NLP] Image REST API Request Failed: {e}")
-            return []
-
-    def generate_place_description(self, name: str, address: Optional[str] = None, country: Optional[str] = None, city: Optional[str] = None) -> dict:
-        """
-        使用 Google Gemini REST API 生成景點的簡短介紹與模擬評價
-        """
-        if not self.api_key:
-            return self._get_default_description(name)
-
-        location_context = ""
-        if address:
-            location_context = f"真實地址在「{address}」的"
-        elif country and city:
-            location_context = f"位於{country}{city}的"
-
-        prompt = f"""
-        請根據真實地點資訊為{location_context}「{name}」生成以下旅遊資訊，請嚴格限制字數以節省長度：
-        1. description: 精簡的繁體中文旅遊介紹，直接點出特色，不超過 50 字。
-        2. pro_comment: 一句模擬網友好評（15字內）。
-        3. con_comment: 一句模擬網友負評或建議（15字內）。
-        
-        請直接回傳 JSON 格式：
-        {{
-            "description": "...",
-            "pro_comment": "...",
-            "con_comment": "..."
-        }}
-        """
-        
-        headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseMimeType": "application/json"}
-        }
-
-        try:
-            response = requests.post(self.base_url, headers=headers, json=payload, timeout=45)
-            if response.status_code == 200:
-                result = response.json()
-                content_text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-                content_text = content_text.replace('```json', '').replace('```', '').strip()
-                data = json.loads(content_text)
-                return {
-                    "description": data.get("description", f"{name} 是當地熱門景點。"),
-                    "pro_comment": data.get("pro_comment", "值得一訪！"),
-                    "con_comment": data.get("con_comment", "人多建議提早。")
-                }
-        except Exception as e:
-            print(f"❌ [NLP] Description failed: {e}")
-            
-        return self._get_default_description(name)
-
-    def ai_geocoding(self, place_name: str, country: str, city: str) -> Optional[Dict[str, Any]]:
-        """
-        當 Google Places API 完全找不到地點時，做為最後一道防線，
-        請 AI 直接給出該確切地點的近似經緯度與地址資訊。
-        """
-        if not self.api_key:
-            return None
-            
-        prompt = f"""
-        你是一個專業的地理定位專家。請給我位於 {country} {city} 的知名地點或店家「{place_name}」的真實地址與精確座標 (緯度與經度)。
-        如果該地點是韓文翻譯過來的，請查明它在韓國的真實位置。
-        
-        請嚴格遵照以下 JSON 格式回傳，不要加上任何其他解釋：
-        {{
-            "address": "繁體中文或當地語言的真實詳細地址",
-            "latitude": 37.123456,
-            "longitude": 127.123456
-        }}
-        如果真的完全找不到或不存在這個地方，請回傳空 JSON：{{}}
-        """
-        
-        headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseMimeType": "application/json"}
-        }
-
-        try:
-            print(f"🤖 [NLP] Emergency Geocoding for {place_name}...")
-            response = requests.post(self.base_url, headers=headers, json=payload, timeout=20)
-            if response.status_code == 200:
-                result = response.json()
-                content_text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-                content_text = content_text.replace('```json', '').replace('```', '').strip()
-                data = json.loads(content_text)
-                
-                if data.get("latitude") and data.get("longitude"):
-                    return data
-        except Exception as e:
-            print(f"❌ [NLP] AI Geocoding failed: {e}")
-            
-        return None
 
     def direct_identify_country(self, title: str, text: str, spots: List[Dict[str, Any]] = []) -> str:
         """
@@ -309,39 +196,18 @@ class NLPService:
             
         return "韓國"
 
-    def _get_default_description(self, name: str) -> dict:
-        return {
-            "description": f"{name} 是當地廣受好評的熱門景點。",
-            "pro_comment": "風景非常漂亮！",
-            "con_comment": "交通略微不便。"
-        }
-
     def _build_extraction_prompt(self, text: str) -> str:
         return f"""
-        你是一位專業的旅遊資料分析師。請分析下方的社群媒體貼文，找出其中提到的「所有具體景點、店家、餐廳、咖啡廳或地標」。
-        
-        **分析原則：**
-        1. **搜尋所有潛在地點**：即使只有縮寫 (例如「安國」)，只要它是個可以去的地方，就應該抓取。
-        2. **精準區分店名與地址 (非常重要！)**：許多貼文會把「詳細地址」(例如：📍大阪府大阪市西区南堀江1丁目9-1) 放在文章最下方或行末。這絕對**不是**店名！你必須往上文尋找真正的店鋪名稱、品牌名或景點名 (例如：Billy's)，將它填入 `name`，並將地址納入 `search_query` 來幫助搜尋。千萬不要把純地址當作店名。
-        3. **韓國與日本優化**：
-           - `name`: 真正的品牌名/店名/景點名 (包含中文名稱加上必要的原文)。
-           - `search_query`: 搜尋關鍵字。如果是**韓國**，務必組合為「South Korea [城市] [真實店名/韓文店名] [地址]」。如果是**日本**，必須包含「Japan [城市] [真實店名] [地址]」。
-        4. **忽略泛稱**：只抓取具體的店名或景點，忽略「超商」、「回程」等無關的地點。
-        
-        請回傳一個 JSON Array：
-        [
-            {{
-                "name": "真實店名或景點名稱 (絕不是純地址)",
-                "search_query": "用於 Google 搜尋的關鍵字 (可包含地址)",
-                "country": "國家",
-                "city": "城市",
-                "category": "類別",
-                "evidence_text": "原文提及片段",
-                "confidence_score": 0.95
-            }}
-        ]
+        你是一位高效能、精準的旅遊資料結構化專家，專門為旅遊 App「Pubo」在第一時間清洗並提取社群媒體（IG/Threads/FB）的景點資料。
 
-        **貼文內容：**
+        你的核心任務是：在最短時間內提取出文中所提及到的景點。為了達成極速提取並避免不必要的 Token 浪費，請直接忽略與景點無關的雜訊。
+        如果找不到任何景點，請回傳空的結果。
+
+        【極度重要規則】：
+        1. 景點名稱 (spot_name) 請「絕對只保留最乾淨的店名或景點名稱」，務必將「特殊編碼 (如 EF56+78)」、「樓層 (如 1F, B1)」等無意義資訊【徹底刪除】！
+        2. 如果原文有明確提供該景點的「具體地址」(例如 3 Chome-31-19...)，請務必將其完整保留，並填入 address 欄位中！
+
+        **待解析內容：**
         \"\"\"
         {text}
         \"\"\"
@@ -359,6 +225,20 @@ class NLPService:
                      if isinstance(val, list):
                          extracted = val
                          break
+                         
+            # 轉換 spot_name 回原本系統需要的 name 等欄位，防止後端崩潰
+            for item in extracted:
+                if "spot_name" in item and "name" not in item:
+                    item["name"] = item["spot_name"]
+                if "search_query" not in item:
+                    item["search_query"] = item.get("name", "")
+                if "country" not in item:
+                    item["country"] = ""
+                if "evidence_text" not in item:
+                    item["evidence_text"] = ""
+                if "confidence_score" not in item:
+                    item["confidence_score"] = 0.95
+
             return extracted
         except Exception as e:
             print(f"❌ [NLP] JSON Parse Error: {e}")

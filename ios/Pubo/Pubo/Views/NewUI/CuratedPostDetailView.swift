@@ -166,16 +166,10 @@ struct CuratedPostDetailView: View {
                                             }
                                         }
                                         
-                                        if let address = spot.address {
-                                            HStack(alignment: .top, spacing: 4) {
-                                                Image(systemName: "mappin.and.ellipse")
-                                                    .font(.system(size: 12))
-                                                Text(address)
-                                                    .font(.system(size: 12))
-                                                    .lineLimit(2)
-                                            }
+                                        Text((spot.address?.isEmpty == false) ? spot.address! : "暫無詳細地址")
+                                            .font(.system(size: 12))
+                                            .lineLimit(2)
                                             .foregroundColor(.gray.opacity(0.8))
-                                        }
                                     }
                                     Spacer()
                                 }
@@ -196,6 +190,7 @@ struct CuratedPostDetailView: View {
                     .padding(.horizontal, 24)
                     .padding(.bottom, 24)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .background(Color.white)
             

@@ -43,6 +43,43 @@ struct FSSpot: Codable {
     var travelDistance: String?
 }
 
+struct FSPlace: Codable {
+    var id: String
+    var name: String
+    var address: String?
+    var latitude: Double
+    var longitude: Double
+    var category: String?
+    var rating: Double?
+    var userRatingCount: Int?
+    var openNow: Bool?
+    var confidenceScore: Double
+    var createdAt: TimeInterval
+    var updatedAt: TimeInterval
+    var openingHours: String?
+    var imageUrl: String?
+    var googlePlaceId: String?
+    var isSaved: Bool
+    var sourceUrl: String?
+    var contents: [FSContent]
+}
+
+struct FSContent: Codable {
+    var id: String
+    var sourceType: String
+    var sourceUrl: String?
+    var title: String?
+    var text: String?
+    var authorName: String?
+    var authorAvatarUrl: String?
+    var previewThumbnailUrl: String?
+    var publishedAt: TimeInterval?
+    var createdAt: TimeInterval
+    var unresolvedQueries: [String]
+    var userCategory: String?
+    var userNote: String?
+}
+
 // MARK: - FirestoreService
 
 final class FirestoreService {
@@ -76,6 +113,57 @@ final class FirestoreService {
         try await db.collection(collection).document(code).setData(data)
         print("☁️ [Firestore] Pushed trip \(sdTrip.title) with code \(code)")
     }
+
+    // MARK: - 強制雲端備份（個人資料庫）
+
+    func backupTripToUserCloud(_ sdTrip: SDTrip, ownerUID: String) async throws {
+        let fsTrip = sdTrip.toFSTrip(ownerUID: ownerUID)
+        let data = try Firestore.Encoder().encode(fsTrip)
+        try await db.collection("user_backups").document(ownerUID).collection("trips").document(sdTrip.id).setData(data)
+        print("☁️ [Firestore] Backed up trip \(sdTrip.title) to user_backups/\(ownerUID)/trips/\(sdTrip.id)")
+    }
+
+    func fetchUserCloudBackups(ownerUID: String) async throws -> [FSTrip] {
+        let snapshot = try await db.collection("user_backups").document(ownerUID).collection("trips").getDocuments()
+        var trips: [FSTrip] = []
+        for doc in snapshot.documents {
+            if let trip = try? Firestore.Decoder().decode(FSTrip.self, from: doc.data()) {
+                trips.append(trip)
+            }
+        }
+        return trips
+    }
+
+    func deleteTripBackup(tripId: String, ownerUID: String) async throws {
+        try await db.collection("user_backups").document(ownerUID).collection("trips").document(tripId).delete()
+        print("☁️ [Firestore] Deleted trip backup: \(tripId)")
+    }
+
+    // MARK: - 收藏庫 (Library/Places) 雲端備份
+
+    func backupPlaceToUserCloud(_ sdPlace: SDPlace, ownerUID: String) async throws {
+        let fsPlace = sdPlace.toFSPlace()
+        let data = try Firestore.Encoder().encode(fsPlace)
+        try await db.collection("user_backups").document(ownerUID).collection("places").document(sdPlace.id).setData(data)
+        print("☁️ [Firestore] Backed up place \(sdPlace.name) to user_backups/\(ownerUID)/places/\(sdPlace.id)")
+    }
+
+    func fetchUserCloudPlaces(ownerUID: String) async throws -> [FSPlace] {
+        let snapshot = try await db.collection("user_backups").document(ownerUID).collection("places").getDocuments()
+        var places: [FSPlace] = []
+        for doc in snapshot.documents {
+            if let place = try? Firestore.Decoder().decode(FSPlace.self, from: doc.data()) {
+                places.append(place)
+            }
+        }
+        return places
+    }
+
+    func deletePlaceBackup(placeId: String, ownerUID: String) async throws {
+        try await db.collection("user_backups").document(ownerUID).collection("places").document(placeId).delete()
+        print("☁️ [Firestore] Deleted place backup: \(placeId)")
+    }
+
 
     // MARK: - 從 Firestore 抓取行程
 
@@ -216,5 +304,93 @@ extension FSTrip {
             order += 1
         }
         return trip
+    }
+}
+
+// MARK: - SDPlace <-> FSPlace Converter
+
+extension SDPlace {
+    func toFSPlace() -> FSPlace {
+        FSPlace(
+            id: self.id,
+            name: self.name,
+            address: self.address,
+            latitude: self.latitude,
+            longitude: self.longitude,
+            category: self.category,
+            rating: self.rating,
+            userRatingCount: self.userRatingCount,
+            openNow: self.openNow,
+            confidenceScore: self.confidenceScore,
+            createdAt: self.createdAt.timeIntervalSince1970,
+            updatedAt: self.updatedAt.timeIntervalSince1970,
+            openingHours: self.openingHours,
+            imageUrl: self.imageUrl,
+            googlePlaceId: self.googlePlaceId,
+            isSaved: self.isSaved,
+            sourceUrl: self.sourceUrl,
+            contents: self.contents.map { c in
+                FSContent(
+                    id: c.id,
+                    sourceType: c.sourceType,
+                    sourceUrl: c.sourceUrl,
+                    title: c.title,
+                    text: c.text,
+                    authorName: c.authorName,
+                    authorAvatarUrl: c.authorAvatarUrl,
+                    previewThumbnailUrl: c.previewThumbnailUrl,
+                    publishedAt: c.publishedAt?.timeIntervalSince1970,
+                    createdAt: c.createdAt.timeIntervalSince1970,
+                    unresolvedQueries: c.unresolvedQueries,
+                    userCategory: c.userCategory,
+                    userNote: c.userNote
+                )
+            }
+        )
+    }
+}
+
+extension FSPlace {
+    func toSDPlace() -> SDPlace {
+        let sdPlace = SDPlace(
+            id: self.id,
+            name: self.name,
+            address: self.address,
+            latitude: self.latitude,
+            longitude: self.longitude,
+            category: self.category,
+            rating: self.rating,
+            userRatingCount: self.userRatingCount,
+            openNow: self.openNow,
+            confidenceScore: self.confidenceScore,
+            createdAt: Date(timeIntervalSince1970: self.createdAt),
+            updatedAt: Date(timeIntervalSince1970: self.updatedAt),
+            openingHours: self.openingHours,
+            imageUrl: self.imageUrl,
+            googlePlaceId: self.googlePlaceId,
+            isSaved: self.isSaved
+        )
+        sdPlace.sourceUrl = self.sourceUrl
+        
+        for c in self.contents {
+            let sdContent = SDContent(
+                id: c.id,
+                sourceType: c.sourceType,
+                sourceUrl: c.sourceUrl,
+                title: c.title,
+                text: c.text,
+                authorName: c.authorName,
+                authorAvatarUrl: c.authorAvatarUrl,
+                previewThumbnailUrl: c.previewThumbnailUrl,
+                publishedAt: c.publishedAt.map { Date(timeIntervalSince1970: $0) },
+                unresolvedQueries: c.unresolvedQueries,
+                userCategory: c.userCategory,
+                userNote: c.userNote,
+                createdAt: Date(timeIntervalSince1970: c.createdAt)
+            )
+            sdPlace.contents.append(sdContent)
+        }
+        
+        return sdPlace
     }
 }

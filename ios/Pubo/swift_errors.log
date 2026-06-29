@@ -1,0 +1,7 @@
+/Users/anita/Cursor/PUBO/ios/Pubo/Pubo/PuboApp.swift:9:8: error: no such module 'FirebaseCore'
+  7 | 
+  8 | import SwiftUI
+  9 | import FirebaseCore
+    |        `- error: no such module 'FirebaseCore'
+ 10 | import FirebaseAuth
+ 11 | import SwiftData

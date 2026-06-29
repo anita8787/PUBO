@@ -14,6 +14,9 @@ struct PlusModalView: View {
     @State private var isExpanded = false
     @State private var errorMessage: String? = nil
     
+    // Keyboard State
+    @State private var keyboardHeight: CGFloat = 0
+    
     private var isURL: Bool {
         linkText.lowercased().hasPrefix("http")
     }
@@ -23,9 +26,9 @@ struct PlusModalView: View {
     @State private var discoveredPlaces: [ContentPlaceInfo] = []
     @State private var selectedPlaceIds: Set<String> = []
     
-    // Photo Picker State
-    @State private var selectedItem: PhotosPickerItem? = nil
-    @State private var isProcessingScreenshot = false
+    // Timer State
+    @State private var elapsedSeconds: Double = 0.0
+    @State private var timerSubscription: Timer? = nil
     
     var body: some View {
         ZStack {
@@ -77,16 +80,20 @@ struct PlusModalView: View {
                             }
                             
                             // Narrow Button at bottom right
-                            HStack {
+                             HStack {
                                 Spacer()
                                 Button(action: handleSmartImport) {
                                     HStack {
                                         if dataService.isProcessingLink {
                                             ProgressView().tint(.white).padding(.trailing, 2)
+                                            Text(String(format: "識別中 (%.1fs) %d%%", elapsedSeconds, Int(dataService.linkProgress * 100)))
+                                                .font(.system(size: 12, weight: .bold))
+                                                .foregroundColor(.white)
+                                        } else {
+                                            Text("開始識別")
+                                                .font(.system(size: 12, weight: .bold))
+                                                .foregroundColor(.white)
                                         }
-                                        Text(dataService.isProcessingLink ? "識別中... \(Int(dataService.linkProgress * 100))%" : "開始識別")
-                                            .font(.system(size: 12, weight: .bold))
-                                            .foregroundColor(.white)
                                     }
                                     .padding(.horizontal, 16)
                                     .padding(.vertical, 8)
@@ -100,33 +107,6 @@ struct PlusModalView: View {
                     .padding(20)
                     .background(Color.white)
                     .cornerRadius(24)
-                    
-                    // 2. 截圖識別卡片
-                    PhotosPicker(selection: $selectedItem, matching: .images, photoLibrary: .shared()) {
-                        HStack(spacing: 12) {
-                            if isProcessingScreenshot {
-                                ProgressView().tint(.black)
-                            } else {
-                                Image(systemName: "photo.on.rectangle")
-                                    .font(.system(size: 20, weight: .bold))
-                                    .foregroundColor(.black)
-                            }
-                            
-                            Text(isProcessingScreenshot ? "圖片辨識中..." : "截圖識別")
-                                .font(.system(size: 16, weight: .bold))
-                                .foregroundColor(.black)
-                            Spacer()
-                        }
-                        .padding(20)
-                        .background(Color(hex: "E5F0FF")) // 淺藍色背景
-                        .cornerRadius(24)
-                    }
-                    .disabled(isProcessingScreenshot)
-                    .onChange(of: selectedItem) { _, newItem in
-                        if let newItem = newItem {
-                            handleScreenshotUpload(item: newItem)
-                        }
-                    }
                     
                     // 3. 關閉按鈕
                     Button(action: {
@@ -142,7 +122,20 @@ struct PlusModalView: View {
                     .padding(.top, 8)
                 }
                 .padding(.horizontal, 24)
-                .padding(.bottom, 24)
+                .padding(.bottom, 24 + keyboardHeight)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { notification in
+            if let keyboardFrame: NSValue = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue {
+                let keyboardRectangle = keyboardFrame.cgRectValue
+                withAnimation(.easeOut(duration: 0.25)) {
+                    self.keyboardHeight = keyboardRectangle.height
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            withAnimation(.easeOut(duration: 0.25)) {
+                self.keyboardHeight = 0
             }
         }
         .onChange(of: dataService.readyImport != nil) { _, hasResult in
@@ -156,44 +149,54 @@ struct PlusModalView: View {
                 }
             }
         }
+        .onChange(of: dataService.isProcessingLink) { _, isProcessing in
+            if isProcessing {
+                elapsedSeconds = 0.0
+                timerSubscription?.invalidate()
+                timerSubscription = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+                    elapsedSeconds += 0.1
+                }
+            } else {
+                timerSubscription?.invalidate()
+                timerSubscription = nil
+            }
+        }
+        .onDisappear {
+            timerSubscription?.invalidate()
+            timerSubscription = nil
+        }
     }
     
     private func handleSmartImport() {
         guard !linkText.isEmpty else { return }
 
-        // 先查收藏庫：若連結已收藏，直接顯示提示，不觸發後端 AI 分析
-        if DataService.shared.isPostCollected(url: linkText) {
-            errorMessage = "✅ 這則貼文已在你的收藏庫中，不需要重複收藏。"
-            return
-        }
-
-        errorMessage = nil
-        DataService.shared.startSmartImport(url: linkText)
-    }
-    
-    private func handleScreenshotUpload(item: PhotosPickerItem) {
-        isProcessingScreenshot = true
-        errorMessage = nil
+        let urls = DataService.shared.extractURLs(from: linkText)
         
-        Task {
-            do {
-                guard let data = try await item.loadTransferable(type: Data.self) else {
-                    throw NSError(domain: "PuboError", code: 0, userInfo: [NSLocalizedDescriptionKey: "無法讀取照片資料"])
-                }
-                
-                let result = try await DataService.shared.analyzeScreenshot(imageData: data)
-                
-                await MainActor.run {
-                    self.isProcessingScreenshot = false
-                    self.selectedItem = nil
-                    DataService.shared.readyImport = PendingImport(content: result.0, places: result.1)
-                }
-            } catch {
-                await MainActor.run {
-                    self.errorMessage = "截圖辨識錯誤: \(error.localizedDescription)"
-                    self.isProcessingScreenshot = false
-                    self.selectedItem = nil
-                }
+        if urls.count > 1 {
+            // 多個連結：直接啟動多連結分析，並關閉輸入面板，由懸浮佇列管理！
+            errorMessage = nil
+            DataService.shared.startSmartImport(url: linkText)
+            withAnimation {
+                isPresented = false
+            }
+        } else if urls.count == 1 {
+            // 單一連結
+            let singleUrl = urls[0]
+            if DataService.shared.isPostCollected(url: singleUrl) {
+                errorMessage = "✅ 這則貼文已在你的收藏庫中，不需要重複收藏。"
+                return
+            }
+            errorMessage = nil
+            DataService.shared.startSmartImport(url: linkText)
+            withAnimation {
+                isPresented = false
+            }
+        } else {
+            // 無連結：純文字列表輸入
+            errorMessage = nil
+            DataService.shared.startSmartImport(url: linkText)
+            withAnimation {
+                isPresented = false
             }
         }
     }

@@ -1,0 +1,17 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /pubo_image/{allPaths=**} {
+      allow read, write: if true;
+    }
+    match /user_image/{allPaths=**} {
+      allow read, write: if true;
+    }
+    match /pubo-images/{allPaths=**} {
+      allow read, write: if true;
+    }
+    match /user-photos/{allPaths=**} {
+      allow read, write: if true;
+    }
+  }
+}

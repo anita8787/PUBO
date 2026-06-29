@@ -3,17 +3,18 @@ import SwiftUI
 // MARK: - Pubo Design System
 
 struct PuboColors {
-    static let navy = Color(hex: "203B93")
-    static let yellow = Color(hex: "FFC849")
-    static let red = Color(hex: "C8252B")
+    static let navy = Color(hex: "0C51A2")
+    static let yellow = Color(hex: "FFCF5E")
+    static let red = Color(hex: "F54E20")
     static let blue = Color(hex: "EBF2FF")
-    static let background = Color(hex: "F5F5F5") 
-    static let green = Color(hex: "34C759") // Apple Green 
-    static let cardYellow = Color(hex: "FFC849")
-    static let cardOrange = Color.orange 
-    static let cardRed = Color(hex: "FF6B6B") 
-    static let cardBlue = Color(hex: "4D96FF") 
-    static let pollutedGreen = Color(hex: "38B3BA") // User-specified green
+    static let background = Color(hex: "FEF9F6") // Warm White
+    static let beige = Color(hex: "FDFAEE") // Beige card/dashboard background
+    static let green = Color(hex: "38B3BA") // Unified Teal/Green
+    static let cardYellow = Color(hex: "FFCF5E")
+    static let cardOrange = Color(hex: "F54E20") 
+    static let cardRed = Color(hex: "F54E20") 
+    static let cardBlue = Color(hex: "0C51A2") 
+    static let pollutedGreen = Color(hex: "38B3BA")
 }
 
 struct PuboStyles {

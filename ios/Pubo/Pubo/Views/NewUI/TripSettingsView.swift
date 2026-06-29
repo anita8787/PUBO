@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct TripSettingsView: View {
+    @Binding var isPresented: Bool
     @Environment(\.dismiss) var dismiss
     @EnvironmentObject var tripManager: TripManager
     
@@ -24,8 +25,6 @@ struct TripSettingsView: View {
     
     var body: some View {
         ZStack {
-            Color(hex: "FDFAEE").ignoresSafeArea() // Brand Beige background
-            
             if let trip = trip {
                 VStack(spacing: 0) {
                     // Custom Header Bar with Red Bottom Line
@@ -76,16 +75,17 @@ struct TripSettingsView: View {
                 }
             }
         }
-        // Wrap the entire view with a red border on top/sides
-        .clipShape(RoundedRectangle(cornerRadius: 32))
-        .overlay(
-            RoundedRectangle(cornerRadius: 32)
-                .stroke(PuboColors.red, lineWidth: 3)
-                .padding(1.5) // Prevents the stroke from being clipped at the edges
-        )
         .ignoresSafeArea(.all, edges: .bottom)
-        .presentationBackground(.clear)
-        .presentationDetents([.fraction(0.85)]) // Height increased from 0.65
+        .background(
+            Color(hex: "FDFAEE")
+                .cornerRadius(32, corners: [.topLeft, .topRight])
+                .ignoresSafeArea(.all, edges: .bottom)
+        )
+        .overlay(
+            RoundedCorner(radius: 32, corners: [.topLeft, .topRight])
+                .stroke(PuboColors.red, lineWidth: 3)
+                .allowsHitTesting(false)
+        )
         .onAppear {
             if let t = trip {
                 self.title = t.title
@@ -97,7 +97,7 @@ struct TripSettingsView: View {
             Button("取消", role: .cancel) { }
             Button("刪除", role: .destructive) {
                 tripManager.deleteTrip(id: tripId)
-                dismiss()
+                dismissView()
             }
         } message: {
             Text("此操作無法復原。")
@@ -260,7 +260,7 @@ struct TripSettingsView: View {
                     
                 HStack {
                     // X Close Button
-                    Button(action: { dismiss() }) {
+                    Button(action: { dismissView() }) {
                         Image("x")
                             .resizable()
                             .renderingMode(.template)
@@ -273,7 +273,7 @@ struct TripSettingsView: View {
                     // 保存 Button
                     Button(action: {
                         saveChanges()
-                        dismiss()
+                        dismissView()
                     }) {
                         Text("保存")
                             .font(.system(size: 14, weight: .bold))
@@ -505,6 +505,11 @@ struct TripSettingsView: View {
             return endCandidate
         }
         return nil
+    }
+    
+    private func dismissView() {
+        isPresented = false
+        dismiss()
     }
 }
 

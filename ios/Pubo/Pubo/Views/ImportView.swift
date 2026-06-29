@@ -102,35 +102,7 @@ struct ImportView: View {
                                         .cornerRadius(4)
                                 }
                                 
-                                HStack(spacing: 8) {
-                                    if let rating = info.place.rating {
-                                        HStack(spacing: 2) {
-                                            Image(systemName: "star.fill")
-                                                .foregroundColor(.yellow)
-                                                .font(.caption2)
-                                            Text(String(format: "%.1f", rating))
-                                                .font(.caption2)
-                                                .fontWeight(.semibold)
-                                            if let count = info.place.userRatingCount {
-                                                Text("(\(count))")
-                                                    .font(.caption2)
-                                                    .foregroundColor(.secondary)
-                                            }
-                                        }
-                                    }
-                                    
-                                    if let openNow = info.place.openNow {
-                                        Text(openNow ? "營業中" : "休息中")
-                                            .font(.caption2)
-                                            .foregroundColor(openNow ? .green : .red)
-                                            .padding(.horizontal, 4)
-                                            .padding(.vertical, 1)
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 2)
-                                                    .stroke(openNow ? Color.green : Color.red, lineWidth: 1)
-                                            )
-                                    }
-                                }
+
                             }
                         }
                         .padding(.vertical, 4)

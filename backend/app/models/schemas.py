@@ -111,7 +111,7 @@ class SpotBase(BaseModel):
     longitude: Optional[float] = None
     travel_time: Optional[str] = None
     travel_distance: Optional[str] = None
-    travel_mode: Optional[str] = "train"
+    travel_mode: Optional[str] = None
 
 class SpotCreate(SpotBase):
     day_id: int
@@ -129,6 +129,7 @@ class SpotUpdate(BaseModel):
     travel_distance: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    image_url: Optional[str] = None
 
 class SpotResponse(SpotBase):
     id: str
@@ -194,6 +195,8 @@ class CuratedPostBase(BaseModel):
     spots: List[Dict[str, Any]] = []
     spot_count: int = 0
     country: Optional[str] = None
+    trip_category: Optional[str] = None  # shopping / dessert / meal / sightseeing / mixed
+    uploader_id: Optional[str] = None
 
 class CuratedPostCreate(CuratedPostBase):
     pass

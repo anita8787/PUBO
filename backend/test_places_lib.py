@@ -21,18 +21,24 @@ async def test_places():
     place = service.search_place(query)
     
     if place:
-        print(f"✅ Found: {place.get('displayName', {}).get('text')} ({place.get('name')})")
-        print(f"   Address: {place.get('formattedAddress')}")
+        place_id = place.get("id") or (place.get("name", "").split("/")[-1] if "/" in place.get("name", "") else place.get("name"))
+        print(f"✅ Found Place ID from search: {place_id} ({place.get('name')})")
+        # Under Option B Essentials SKU, displayName and formattedAddress should not be in the search result:
+        print(f"   DisplayName in Search (should be None): {place.get('displayName')}")
+        print(f"   Address in Search (should be None): {place.get('formattedAddress')}")
         
         # 2. Test Details
-        place_id = place.get("name").split("/")[-1]
         print(f"\nℹ️ Getting details for ID: {place_id}...")
         details = service.get_place_details(place_id)
         
         if details:
             print("✅ Details fetched successfully!")
-            print(f"   Rating: {details.get('rating')}")
-            print(f"   Opening Hours: {details.get('currentOpeningHours', {}).get('openNow', 'Unknown')}")
+            print(f"   Official Name (displayName): {details.get('displayName', {}).get('text')}")
+            print(f"   Formatted Address: {details.get('formattedAddress')}")
+            print(f"   Location: {details.get('location')}")
+            # The following should be None because we removed them from the FieldMask to save cost
+            print(f"   Rating (should be None): {details.get('rating')}")
+            print(f"   Opening Hours (should be None): {details.get('currentOpeningHours')}")
         else:
             print("❌ Failed to get details.")
     else:

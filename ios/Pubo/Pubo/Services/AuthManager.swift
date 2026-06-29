@@ -9,8 +9,8 @@ class AuthManager: ObservableObject {
 
     static let shared = AuthManager()
 
-    @Published var currentUser: User?
-    @Published var isSignedIn: Bool = false
+    @Published var currentUser: User? = Auth.auth().currentUser
+    @Published var isSignedIn: Bool = Auth.auth().currentUser != nil
 
     /// 目前登入者的 UID（用於 Firestore ownerUID 欄位）
     var currentUID: String {
@@ -38,6 +38,12 @@ class AuthManager: ObservableObject {
 
     func signIn(email: String, password: String) async throws {
         let result = try await Auth.auth().signIn(withEmail: email, password: password)
+        self.currentUser = result.user
+        self.isSignedIn = true
+    }
+
+    func signInAnonymously() async throws {
+        let result = try await Auth.auth().signInAnonymously()
         self.currentUser = result.user
         self.isSignedIn = true
     }

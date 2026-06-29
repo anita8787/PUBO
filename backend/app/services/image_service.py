@@ -4,160 +4,234 @@ import os
 import uuid
 import mimetypes
 from typing import Optional
-from supabase import create_client, Client
+
+# Firebase Storage bucket name - will be set once Firebase Storage is enabled
+FIREBASE_STORAGE_BUCKET = os.environ.get("FIREBASE_STORAGE_BUCKET", "pubo-production.firebasestorage.app")
+
 
 class ImageService:
     """
     提供景點圖片的「自動補水」功能與「圖片永久儲存」功能。
-    當 Google Places 或原始社群貼文都沒有圖片時，透過搜尋引擎尋找相關圖片，並儲存至 Supabase。
+    使用 Firebase Storage 儲存圖片，並透過 Firebase 下載 Token 產生永久不過期的公開連結。
     """
-    
+
     def __init__(self):
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
-        
-        # 初始化 Supabase
-        supabase_url = os.environ.get("SUPABASE_URL")
-        supabase_key = os.environ.get("SUPABASE_KEY")
-        if supabase_url and supabase_key:
-            self.supabase: Client = create_client(supabase_url, supabase_key)
-        else:
-            self.supabase = None
-            print("⚠️ [ImageService] Supabase credentials missing. Cloud upload disabled.")
 
-    def fetch_fallback_image(self, query: str) -> Optional[str]:
+    def _get_firebase_bucket(self):
+        """取得 Firebase Storage bucket，並確保 SDK 已初始化。"""
+        import firebase_admin
+        from firebase_admin import credentials, storage as fb_storage
+
+        if not firebase_admin._apps:
+            # 找 firebase-key.json
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            key_path = None
+            for _ in range(5):
+                temp_path = os.path.join(current_dir, "firebase-key.json")
+                if os.path.exists(temp_path):
+                    key_path = temp_path
+                    break
+                current_dir = os.path.dirname(current_dir)
+
+            if key_path:
+                cred = credentials.Certificate(key_path)
+                firebase_admin.initialize_app(cred, {"storageBucket": FIREBASE_STORAGE_BUCKET})
+                print(f"✅ [ImageService] Firebase Admin SDK 啟動，bucket: {FIREBASE_STORAGE_BUCKET}")
+            else:
+                firebase_admin.initialize_app()
+                print("✅ [ImageService] Firebase Admin SDK 啟動（環境變數模式）")
+
+        return fb_storage.bucket(FIREBASE_STORAGE_BUCKET)
+
+    def _upload_and_get_permanent_url(self, data: bytes, filename: str, content_type: str) -> Optional[str]:
         """
-        透過 DuckDuckGo Image Search 抓取第一張相關圖片。
-        這是一個「免費且無須 API Key」的解決方案。
+        上傳資料到 Firebase Storage，並回傳永久公開的下載 URL。
+        使用 Firebase Storage 的 Download Token 機制，產生不會過期的連結。
         """
-        if not query or len(query) < 2:
-            return None
-            
-        print(f"🖼️ [ImageService] Searching fallback for: {query}")
-        
         try:
-            # 1. 取得搜尋頁面的 Token (vqd)
-            search_url = "https://duckduckgo.com/"
-            res = requests.post(search_url, data={"q": query}, headers=self.headers, timeout=5)
-            vqd_match = re.search(r'vqd=([\d-]+)&', res.text)
-            
-            if not vqd_match:
-                # Try simple GET if POST failed
-                res = requests.get(search_url, params={"q": query}, headers=self.headers, timeout=5)
-                vqd_match = re.search(r'vqd=([\d-]+)&', res.text)
-            
-            if not vqd_match:
-                print("⚠️ [ImageService] Could not find vqd token")
-                return None
-            
-            vqd = vqd_match.group(1)
-            
-            # 2. 呼叫 DuckDuckGo Image API
-            # mode=wt-wt is no-proxy, i=all is all regions
-            image_api_url = "https://duckduckgo.com/i.js"
-            params = {
-                "l": "wt-wt",
-                "o": "json",
-                "q": query,
-                "vqd": vqd,
-                "f": ",,,",
-                "p": "1"
-            }
-            
-            img_res = requests.get(image_api_url, params=params, headers=self.headers, timeout=5)
-            data = img_res.json()
-            
-            if "results" in data and len(data["results"]) > 0:
-                # 抓取第一張圖片的 URL
-                img_url = data["results"][0].get("image")
-                print(f"✅ [ImageService] Found image: {img_url}")
-                return img_url
-                
-            return None
-            
+            from firebase_admin import storage as fb_storage
+            from google.oauth2 import service_account
+            from google.auth.transport.requests import Request as GoogleRequest
+
+            bucket = self._get_firebase_bucket()
+            blob = bucket.blob(filename)
+            blob.upload_from_string(data, content_type=content_type)
+
+            # 透過 Firebase Storage REST API 取得含 download token 的永久 URL
+            # 這個 token 是 Firebase 專有機制，不受 uniform bucket-level access 影響，也不會過期
+            key_path = self._find_firebase_key()
+            if key_path:
+                sa_cred = service_account.Credentials.from_service_account_file(
+                    key_path,
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                )
+                sa_cred.refresh(GoogleRequest())
+                access_token = sa_cred.token
+
+                encoded_path = filename.replace("/", "%2F")
+                metadata_url = f"https://firebasestorage.googleapis.com/v0/b/{FIREBASE_STORAGE_BUCKET}/o/{encoded_path}"
+                r = requests.get(metadata_url, headers={"Authorization": f"Bearer {access_token}"})
+
+                if r.status_code == 200:
+                    meta = r.json()
+                    if "downloadTokens" in meta:
+                        dl_token = meta["downloadTokens"].split(",")[0]
+                        permanent_url = f"https://firebasestorage.googleapis.com/v0/b/{FIREBASE_STORAGE_BUCKET}/o/{encoded_path}?alt=media&token={dl_token}"
+                        print(f"✅ [ImageService] 永久 URL: {permanent_url[:80]}...")
+                        return permanent_url
+
+            # 備用：回傳 public URL（若 bucket 已設置 allUsers objectViewer）
+            blob.make_public()
+            return blob.public_url
+
         except Exception as e:
-            print(f"❌ [ImageService] Search failed for '{query}': {e}")
+            print(f"❌ [ImageService] Upload error: {e}")
             return None
 
-    def upload_to_supabase(self, image_url: str) -> str:
+    def _find_firebase_key(self) -> Optional[str]:
+        """尋找 firebase-key.json 的路徑。"""
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        for _ in range(5):
+            path = os.path.join(current_dir, "firebase-key.json")
+            if os.path.exists(path):
+                return path
+            current_dir = os.path.dirname(current_dir)
+        return None
+
+
+
+    def upload_to_firebase(self, image_url: str) -> str:
         """
-        下載外部的過期圖片，並上傳到 Supabase Storage 以獲取永久連結。
-        如果失敗，則回傳原本的 image_url（作為最後手段）。
+        下載外部圖片（如 Instagram CDN），上傳到 Firebase Storage，
+        並回傳永久不過期的下載 URL。
+        【去重機制】：使用圖片內容 MD5 Hash 作為檔名，確保同一張社群封面圖只儲存一次。
         """
-        if not image_url or not self.supabase:
+        import hashlib
+        
+        if not image_url:
             return image_url
-            
-        # 避免重複上傳已經在 Supabase 的圖片
-        if "supabase.co" in image_url:
-            print(f"⏩ [ImageService] URL is already in Supabase, skipping upload: {image_url}")
+
+        # 已在 Firebase Storage 就跳過（直接回傳永久連結）
+        if "firebasestorage.googleapis.com" in image_url:
+            print(f"⏩ [ImageService] 已在 Firebase，跳過: {image_url[:60]}")
             return image_url
-            
-        print(f"☁️ [ImageService] Uploading to Supabase: {image_url}")
+
+        print(f"☁️ [ImageService] 下載並上傳到 Firebase: {image_url[:60]}")
         try:
-            # 下載圖片到記憶體
             res = requests.get(image_url, headers=self.headers, timeout=15)
             if res.status_code != 200:
-                print(f"❌ [ImageService] Download failed: HTTP {res.status_code}")
+                print(f"❌ [ImageService] 下載失敗 HTTP {res.status_code}")
                 return image_url
-                
-            content_type = res.headers.get('content-type', '')
-            if not content_type.startswith('image/'):
-                content_type = 'image/jpeg'
-                
-            # 決定副檔名
-            ext = mimetypes.guess_extension(content_type) or '.jpg'
-            if ext == '.jpe': ext = '.jpg'
-            
-            # 產生隨機檔名以免碰撞
-            filename = f"{uuid.uuid4().hex}{ext}"
-            
-            # 上傳至 Supabase Storage (pubo-images bucket)
-            self.supabase.storage.from_("pubo-images").upload(
-                file=res.content,
-                path=filename,
-                file_options={"content-type": content_type}
-            )
-            
-            # 取得公開的永久 URL
-            public_url = self.supabase.storage.from_("pubo-images").get_public_url(filename)
-            print(f"✅ [ImageService] Upload successful! Permanent URL: {public_url}")
-            return public_url
-            
+
+            content_type = res.headers.get("content-type", "")
+            if not content_type.startswith("image/"):
+                content_type = "image/jpeg"
+
+            ext = mimetypes.guess_extension(content_type) or ".jpg"
+            if ext == ".jpe":
+                ext = ".jpg"
+
+            # 【去重】用圖片內容 MD5 Hash 做檔案名稱，相同圖片只存一次
+            img_hash = hashlib.md5(res.content).hexdigest()
+            filename = f"pubo_image/{img_hash}{ext}"
+
+            # 先檢查 Firebase Storage 是否已存在相同 hash 的圖片
+            try:
+                bucket = self._get_firebase_bucket()
+                existing_blob = bucket.blob(filename)
+                if existing_blob.exists():
+                    print(f"⏩ [ImageService] 社群封面圖已存在（Hash 相同），跳過重複上傳: {filename}")
+                    key_path = self._find_firebase_key()
+                    if key_path:
+                        from google.oauth2 import service_account
+                        from google.auth.transport.requests import Request as GoogleRequest
+                        sa_cred = service_account.Credentials.from_service_account_file(
+                            key_path, scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                        )
+                        sa_cred.refresh(GoogleRequest())
+                        access_token = sa_cred.token
+                        encoded_path = filename.replace("/", "%2F")
+                        metadata_url = f"https://firebasestorage.googleapis.com/v0/b/{FIREBASE_STORAGE_BUCKET}/o/{encoded_path}"
+                        r = requests.get(metadata_url, headers={"Authorization": f"Bearer {access_token}"})
+                        if r.status_code == 200:
+                            meta = r.json()
+                            if "downloadTokens" in meta:
+                                dl_token = meta["downloadTokens"].split(",")[0]
+                                existing_url = f"https://firebasestorage.googleapis.com/v0/b/{FIREBASE_STORAGE_BUCKET}/o/{encoded_path}?alt=media&token={dl_token}"
+                                print(f"✅ [ImageService] 回傳已存在社群圖的永久 URL: {existing_url[:80]}...")
+                                return existing_url
+            except Exception as check_err:
+                print(f"⚠️ [ImageService] 無法確認既有檔案，改為全新上傳: {check_err}")
+
+            result_url = self._upload_and_get_permanent_url(res.content, filename, content_type)
+            return result_url if result_url else image_url
+
         except Exception as e:
             print(f"❌ [ImageService] Upload Error: {e}")
             return image_url
 
-    def upload_bytes_to_supabase(self, image_bytes: bytes, content_type: str) -> Optional[str]:
+    def upload_bytes_to_firebase(self, image_bytes: bytes, content_type: str) -> Optional[str]:
         """
-        上傳原始二進位資料到 Supabase Storage (主要用於截圖上傳)，並獲取永久連結。
+        上傳原始二進位資料到 Firebase Storage（主要用於用戶自訂圖片上傳），
+        並回傳永久不過期的下載 URL。
+        【去重機制】：使用圖片內容的 MD5 Hash 作為檔案名稱，確保同一張圖片只儲存一次。
         """
-        if not self.supabase:
-            print("⚠️ [ImageService] No supabase client for bytes upload.")
-            return None
-            
-        print(f"☁️ [ImageService] Uploading bytes to Supabase. Content-Type: {content_type}")
+        import hashlib
+        
+        print(f"☁️ [ImageService] 上傳 bytes 到 Firebase Storage. Content-Type: {content_type}")
         try:
-            # 決定副檔名
-            ext = mimetypes.guess_extension(content_type) or '.jpg'
-            if ext == '.jpe': ext = '.jpg'
+            ext = mimetypes.guess_extension(content_type) or ".jpg"
+            if ext == ".jpe":
+                ext = ".jpg"
+
+            # 【去重】用圖片內容 MD5 Hash 做檔案名稱，相同圖片只存一次
+            img_hash = hashlib.md5(image_bytes).hexdigest()
+            filename = f"user_image/{img_hash}{ext}"
             
-            # 產生隨機檔名以免碰撞
-            filename = f"screenshot_{uuid.uuid4().hex}{ext}"
+            # 先檢查 Firebase Storage 是否已存在相同 hash 的圖片
+            try:
+                bucket = self._get_firebase_bucket()
+                existing_blob = bucket.blob(filename)
+                if existing_blob.exists():
+                    # 已存在，直接取得並回傳現有的永久 URL
+                    print(f"⏩ [ImageService] 圖片已存在（Hash 相同），跳過重複上傳: {filename}")
+                    key_path = self._find_firebase_key()
+                    if key_path:
+                        from google.oauth2 import service_account
+                        from google.auth.transport.requests import Request as GoogleRequest
+                        sa_cred = service_account.Credentials.from_service_account_file(
+                            key_path,
+                            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                        )
+                        sa_cred.refresh(GoogleRequest())
+                        access_token = sa_cred.token
+                        encoded_path = filename.replace("/", "%2F")
+                        metadata_url = f"https://firebasestorage.googleapis.com/v0/b/{FIREBASE_STORAGE_BUCKET}/o/{encoded_path}"
+                        r = requests.get(metadata_url, headers={"Authorization": f"Bearer {access_token}"})
+                        if r.status_code == 200:
+                            meta = r.json()
+                            if "downloadTokens" in meta:
+                                dl_token = meta["downloadTokens"].split(",")[0]
+                                existing_url = f"https://firebasestorage.googleapis.com/v0/b/{FIREBASE_STORAGE_BUCKET}/o/{encoded_path}?alt=media&token={dl_token}"
+                                print(f"✅ [ImageService] 回傳已存在的永久 URL: {existing_url[:80]}...")
+                                return existing_url
+            except Exception as check_err:
+                print(f"⚠️ [ImageService] 無法確認既有檔案，改為全新上傳: {check_err}")
             
-            # 上傳至 Supabase Storage (pubo-images bucket)
-            self.supabase.storage.from_("pubo-images").upload(
-                file=image_bytes,
-                path=filename,
-                file_options={"content-type": content_type}
-            )
-            
-            # 取得公開的永久 URL
-            public_url = self.supabase.storage.from_("pubo-images").get_public_url(filename)
-            print(f"✅ [ImageService] Bytes upload successful! Permanent URL: {public_url}")
-            return public_url
-            
+            result_url = self._upload_and_get_permanent_url(image_bytes, filename, content_type)
+
+            if result_url:
+                print(f"✅ [ImageService] 上傳成功！永久 URL: {result_url[:80]}")
+                return result_url
+            return None
+
         except Exception as e:
             print(f"❌ [ImageService] Bytes Upload Error: {e}")
             return None
 
+    # 向下相容的別名
+    upload_to_supabase = upload_to_firebase
+    upload_bytes_to_supabase = upload_bytes_to_firebase

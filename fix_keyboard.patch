@@ -1,0 +1,67 @@
+--- ios/Pubo/Pubo/Views/NewUI/PlusModalView.swift
++++ ios/Pubo/Pubo/Views/NewUI/PlusModalView.swift
+@@ -29,13 +29,15 @@
+     @State private var selectedItem: PhotosPickerItem? = nil
+     @State private var isProcessingScreenshot = false
+     
++    @State private var keyboardHeight: CGFloat = 0
++
+     var body: some View {
+         ZStack {
+             // === 全螢幕半透明遮罩 ===
+             Color.black.opacity(0.4)
+-                .ignoresSafeArea(edges: [.top, .leading, .trailing, .bottom]) // Keep visual cover full screen
++                .ignoresSafeArea(.all)
+                 .onTapGesture {
+                     withAnimation(.easeOut(duration: 0.25)) {
+                         isPresented = false
+                     }
+                 }
+@@ -107,29 +109,6 @@
+                     .background(Color.white)
+                     .cornerRadius(24)
+                     
+-                    // 2. 截圖識別卡片
+-                    PhotosPicker(selection: $selectedItem, matching: .images, photoLibrary: .shared()) {
+-                        HStack(spacing: 12) {
+-                            if isProcessingScreenshot {
+-                                ProgressView().tint(.black)
+-                            } else {
+-                                Image(systemName: "photo.on.rectangle")
+-                                    .font(.system(size: 20, weight: .bold))
+-                                    .foregroundColor(.black)
+-                            }
+-                            
+-                            Text(isProcessingScreenshot ? "圖片辨識中..." : "截圖識別")
+-                                .font(.system(size: 16, weight: .bold))
+-                                .foregroundColor(.black)
+-                            Spacer()
+-                        }
+-                        .padding(20)
+-                        .background(Color.white)
+-                        .cornerRadius(24)
+-                    }
+-                    .disabled(isProcessingScreenshot)
+-                    .onChange(of: selectedItem) { _, newItem in
+-                        if let newItem = newItem {
+-                            handleScreenshotUpload(item: newItem)
+-                        }
+-                    }
+-                    
+                     // 3. 關閉按鈕
+                     Button(action: {
+                         withAnimation { isPresented = false }
+@@ -143,10 +122,9 @@
+                     .padding(.top, 8)
+                 }
+                 .padding(.horizontal, 24)
+-                .padding(.bottom, 24)
++                .padding(.bottom, 24 + keyboardHeight)
+             }
+-            .ignoresSafeArea(.keyboard, edges: .bottom) // Fix keyboard overlap? Actually SwiftUI normally avoids it. We'll add this just in case, but usually we just NOT ignore safe area.
+         }
+-        // Ensure keyboard pushes the view up:
+-        .ignoresSafeArea(.container, edges: [.top]) // ignore top but respect bottom safe area including keyboard
++        .onReceive(Publishers.keyboardHeight) { self.keyboardHeight = $0 }
+         .onChange(of: dataService.readyImport != nil) { _, hasResult in
+             if hasResult {

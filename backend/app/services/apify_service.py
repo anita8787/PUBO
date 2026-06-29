@@ -35,8 +35,11 @@ class ApifyService:
             # 使用 apify/instagram-scraper
             run = self.client.actor("apify/instagram-scraper").call(run_input=run_input)
             
+            # Safely get dataset_id (handles both dict and Run object from newer apify-client versions)
+            dataset_id = run.get("defaultDatasetId") if isinstance(run, dict) else getattr(run, "defaultDatasetId", getattr(run, "default_dataset_id", None))
+            
             # 檢查 dataset 是否為空
-            dataset_items = list(self.client.dataset(run["defaultDatasetId"]).iterate_items())
+            dataset_items = list(self.client.dataset(dataset_id).iterate_items())
             
             if not dataset_items:
                 # 若無結果，通常是私人帳號或連結錯誤
@@ -133,7 +136,11 @@ class ApifyService:
             }
             
             run = self.client.actor("apify/puppeteer-scraper").call(run_input=run_input)
-            dataset = self.client.dataset(run["defaultDatasetId"])
+            
+            # Safely get dataset_id
+            dataset_id = run.get("defaultDatasetId") if isinstance(run, dict) else getattr(run, "defaultDatasetId", getattr(run, "default_dataset_id", None))
+            
+            dataset = self.client.dataset(dataset_id)
             items = list(dataset.iterate_items())
             
             if not items:

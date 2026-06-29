@@ -1,25 +1,22 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session, joinedload
 from typing import List
-from ..models.database import get_db, Content, Place, ContentPlaceAssociation
+from ..models.database import get_db, Content, Place, ContentPlaceAssociation, FirestoreSession
 from ..models import schemas
+from datetime import datetime
 
 router = APIRouter()
 
 @router.get("/collection", response_model=List[schemas.ContentResponse])
-def get_collection(db: Session = Depends(get_db)):
+def get_collection(db: FirestoreSession = Depends(get_db)):
     """
     獲取所有已收藏的內容 (連結模式)
     """
-    contents = db.query(Content).options(
-        joinedload(Content.place_associations).joinedload(ContentPlaceAssociation.place)
-    ).filter(Content.is_collected == 1).order_by(Content.created_at.desc()).all()
-    
-    # 轉換為 Response 格式 (Pydantic model 會處理)
+    contents = db.query(Content).filter(Content.is_collected == 1).all()
+    contents.sort(key=lambda x: getattr(x, "created_at", None) or datetime.min, reverse=True)
     return contents
 
 @router.post("/collection", response_model=schemas.ContentResponse)
-def add_to_collection(request: schemas.CollectionRequest, db: Session = Depends(get_db)):
+def add_to_collection(request: schemas.CollectionRequest, db: FirestoreSession = Depends(get_db)):
     """
     將特定網址標記為收藏。如果網址尚未分析過，則嘗試從相關來源建立基礎紀錄。
     支援 place_ids 列表，用於精選貼文的一鍵匯入同步。
@@ -42,7 +39,6 @@ def add_to_collection(request: schemas.CollectionRequest, db: Session = Depends(
         )
         db.add(content)
         db.commit()
-        db.refresh(content)
     else:
         content.is_collected = 1
         db.commit()
@@ -73,12 +69,10 @@ def add_to_collection(request: schemas.CollectionRequest, db: Session = Depends(
         db.commit()
 
     # Re-fetch with associations
-    return db.query(Content).options(
-        joinedload(Content.place_associations).joinedload(ContentPlaceAssociation.place)
-    ).filter(Content.id == content.id).first()
+    return db.query(Content).filter(Content.id == content.id).first()
 
 @router.delete("/collection")
-def remove_from_collection(url: str, db: Session = Depends(get_db)):
+def remove_from_collection(url: str, db: FirestoreSession = Depends(get_db)):
     """
     移除收藏
     """

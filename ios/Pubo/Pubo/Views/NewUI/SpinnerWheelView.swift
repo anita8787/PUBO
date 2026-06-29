@@ -95,28 +95,69 @@ struct SpinnerWheelView: View {
                     Spacer().frame(height: 60)
                 }
                 .padding(.top, 24)
+                .background(Color.white.opacity(0.001)) // Make entire VStack tappable
+                .onTapGesture {
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                }
             }
+            .scrollDismissesKeyboard(.interactively)
             .background(PuboColors.background)
         }
         .background(PuboColors.background)
     }
+
+// MARK: - Wheel Subviews
+private struct WheelSlicesView: View {
+    let n: Int
+    let sliceColors: [Color]
+    
+    var body: some View {
+        let slice = 360.0 / Double(n)
+        ZStack {
+            ForEach(0..<n, id: \.self) { i in
+                let start = Angle.degrees(slice * Double(i) - 90)
+                let end = Angle.degrees(slice * Double(i + 1) - 90)
+                PieSlice(startAngle: start, endAngle: end)
+                    .fill(sliceColors[i % sliceColors.count])
+                PieSlice(startAngle: start, endAngle: end)
+                    .stroke(Color.white, lineWidth: 2)
+            }
+        }
+    }
+}
+
+private struct WheelLabelsView: View {
+    let n: Int
+    let validOptions: [String]
+    let rotation: Double
+    let isSpinning: Bool
+    
+    var body: some View {
+        let slice = 360.0 / Double(n)
+        ZStack {
+            ForEach(0..<n, id: \.self) { i in
+                let midDeg = (slice * Double(i) + slice / 2 - 90) * .pi / 180
+                let fontSize = max(9.0, min(11.0, 80.0 / Double(n)))
+                Text(validOptions[i])
+                    .font(.system(size: fontSize, weight: .bold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .offset(x: 80 * cos(midDeg), y: 80 * sin(midDeg))
+                    .rotationEffect(.degrees(rotation))
+                    .animation(isSpinning ? .easeOut(duration: 3.5) : .none, value: rotation)
+            }
+        }
+    }
+}
 
     // MARK: - Wheel
     private var wheelView: some View {
         ZStack {
             if validOptions.count >= 2 {
                 let n = validOptions.count
-                let slice = 360.0 / Double(n)
 
                 ZStack {
-                    ForEach(0..<n, id: \.self) { i in
-                        let start = Angle.degrees(slice * Double(i) - 90)
-                        let end = Angle.degrees(slice * Double(i + 1) - 90)
-                        PieSlice(startAngle: start, endAngle: end)
-                            .fill(sliceColors[i % sliceColors.count])
-                        PieSlice(startAngle: start, endAngle: end)
-                            .stroke(Color.white, lineWidth: 2)
-                    }
+                    WheelSlicesView(n: n, sliceColors: sliceColors)
                     // Center dot
                     Circle().fill(Color.white).frame(width: 32, height: 32)
                 }
@@ -125,16 +166,7 @@ struct SpinnerWheelView: View {
                 .animation(isSpinning ? .easeOut(duration: 3.5) : .none, value: rotation)
 
                 // Labels
-                ForEach(0..<n, id: \.self) { i in
-                    let midDeg = (slice * Double(i) + slice / 2 - 90) * .pi / 180
-                    Text(validOptions[i])
-                        .font(.system(size: max(9, min(11, 80.0 / Double(n))), weight: .bold))
-                        .foregroundColor(.white)
-                        .lineLimit(1)
-                        .offset(x: 80 * cos(midDeg), y: 80 * sin(midDeg))
-                        .rotationEffect(.degrees(rotation))
-                        .animation(isSpinning ? .easeOut(duration: 3.5) : .none, value: rotation)
-                }
+                WheelLabelsView(n: n, validOptions: validOptions, rotation: rotation, isSpinning: isSpinning)
 
                 // Pointer
                 Image(systemName: "arrowtriangle.down.fill")

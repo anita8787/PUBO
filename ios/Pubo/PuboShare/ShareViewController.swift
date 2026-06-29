@@ -1,13 +1,7 @@
-//
-//  ShareViewController.swift
-//  PuboShare
-//
-//  Created by Pubo Team on 2026/2/8.
-//
-
 import UIKit
 import Social
 import MobileCoreServices
+import SwiftUI
 
 class ShareViewController: UIViewController {
     
@@ -28,20 +22,18 @@ class ShareViewController: UIViewController {
     private let closeButton = UIButton(type: .system)
     
      private var cardBottomConstraint: NSLayoutConstraint?
+     private var hostingController: UIViewController?
 
      override func viewDidLoad() {
          super.viewDidLoad()
+         view.backgroundColor = .clear
          setupLayout()
      }
 
      override func viewDidAppear(_ animated: Bool) {
          super.viewDidAppear(animated)
-         showCardAnimation()
-         // 動畫完成後再開始提取
-         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-             self.showLoadingState()
-             self.extractURLAndProcess()
-         }
+         // Extract URL first to decide flow — Google Maps URLs go straight to SwiftUI bottom sheet
+         self.extractURLAndProcess()
      }
  
      private func setupLayout() {
@@ -90,6 +82,10 @@ class ShareViewController: UIViewController {
     }
     
     private func hideCardAnimation(completion: @escaping () -> Void) {
+        if self.hostingController != nil {
+            completion()
+            return
+        }
         self.cardBottomConstraint?.constant = 300
         
         UIView.animate(withDuration: 0.3, delay: 0, options: .curveEaseIn) {
@@ -221,8 +217,6 @@ class ShareViewController: UIViewController {
             self.laterButton.isHidden = false
             self.closeButton.isHidden = false
             
-            // Store taskId in button tag or property if needed, but we can capture it in closure
-            // Re-assign target to capture taskId
             self.viewNowButton.removeTarget(nil, action: nil, for: .allEvents)
             self.viewNowButton.addAction(UIAction { [weak self] _ in
                 self?.openMainApp(taskId: taskId)
@@ -240,7 +234,6 @@ class ShareViewController: UIViewController {
     }
     
     @objc private func handleViewNow() {
-        // Placeholder, action replaced in showSuccessState
     }
     
     @objc private func handleLater() {
@@ -253,50 +246,180 @@ class ShareViewController: UIViewController {
  
      private func extractURLAndProcess() {
          guard let extensionItem = extensionContext?.inputItems.first as? NSExtensionItem,
-               let attachment = extensionItem.attachments?.first else {
+               let attachments = extensionItem.attachments,
+               !attachments.isEmpty else {
              self.closeExtension()
              return
          }
          
-         // Helper to safely process valid URL
-         func handleValidURL(_ url: URL) {
-             self.processShareURL(url)
-         }
- 
-         if attachment.hasItemConformingToTypeIdentifier("public.url") {
-             attachment.loadItem(forTypeIdentifier: "public.url", options: nil) { [weak self] (data, error) in
-                 guard let self = self else { return }
-                 if let url = data as? URL {
-                     handleValidURL(url)
-                 } else if let urlString = data as? String, let url = URL(string: urlString) {
-                     handleValidURL(url)
-                 } else {
-                     self.closeExtension()
+         func extractNameAndURL(from text: String) -> (URL?, String?) {
+             guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return (nil, nil) }
+             let matches = detector.matches(in: text, options: [], range: NSRange(location: 0, length: text.utf16.count))
+             guard let firstMatch = matches.first, let url = firstMatch.url else { return (nil, nil) }
+             
+             let nsText = text as NSString
+             let prefix = nsText.substring(to: firstMatch.range.location)
+             var trimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+             
+             let patterns = [
+                 "我在 Google 地圖上找到了這個地方：",
+                 "我在 Google 地圖上分享了一個地點：",
+                 "我分享了一個地點：",
+                 "我在Google地圖上找到了這個地方：",
+                 "我在Google地圖上分享了一個地點：",
+                 "I found this place on Google Maps: ",
+                 "Check out this place on Google Maps: "
+             ]
+             
+             for pattern in patterns {
+                 if let range = trimmed.range(of: pattern) {
+                     trimmed.removeSubrange(trimmed.startIndex..<range.upperBound)
                  }
              }
-         } else if attachment.hasItemConformingToTypeIdentifier("public.plain-text") {
-             attachment.loadItem(forTypeIdentifier: "public.plain-text", options: nil) { [weak self] (data, error) in
-                 guard let self = self else { return }
-                 if let text = data as? String, let url = URL(string: text), text.hasPrefix("http") {
-                      handleValidURL(url)
-                 } else {
-                      self.closeExtension()
+             
+             let finalTrimmed = trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
+            if finalTrimmed.isEmpty || finalTrimmed.contains("http") {
+                return (url, nil)
+            }
+            let firstLine = finalTrimmed.components(separatedBy: .newlines).first ?? ""
+            let cleanedFirstLine = firstLine
+                .replacingOccurrences(of: " ", with: "")
+                .replacingOccurrences(of: "\u{00A0}", with: "")
+                .lowercased()
+                
+            let invalidCleanNames: Set<String> = [
+                "google地圖", "googlemaps", "maps", "地圖", "applemaps", "google地图"
+            ]
+            if invalidCleanNames.contains(cleanedFirstLine) {
+                return (url, nil)
+            }
+            let sanitizedName = GoogleMapsURLResolver.sanitizePlaceName(firstLine)
+            return (url, sanitizedName.isEmpty ? nil : sanitizedName)
+         }
+         
+         func handleURLAndName(_ url: URL, _ name: String?) {
+             let urlString = url.absoluteString.lowercased()
+             let isGoogleMaps = urlString.contains("google.com/maps") || urlString.contains("maps.app.goo.gl")
+             
+             if isGoogleMaps {
+                 DispatchQueue.main.async {
+                     // Google Maps: skip UIKit card, go straight to SwiftUI bottom sheet
+                     self.presentSwiftUIView(url: url, preExtractedName: name)
+                 }
+             } else {
+                 DispatchQueue.main.async {
+                     // Non-Google Maps: show UIKit loading card first
+                     self.showCardAnimation()
+                     self.showLoadingState()
+                     self.processShareURL(url)
                  }
              }
-         } else {
-             self.closeExtension()
          }
+         
+         func checkURLAttachment(attachment: NSItemProvider, index: Int) {
+             if attachment.hasItemConformingToTypeIdentifier("public.url") {
+                 attachment.loadItem(forTypeIdentifier: "public.url", options: nil) { (data, error) in
+                     if let url = data as? URL {
+                         handleURLAndName(url, nil)
+                     } else if let urlString = data as? String {
+                         let (url, name) = extractNameAndURL(from: urlString)
+                         if let url = url {
+                             handleURLAndName(url, name)
+                         } else {
+                             tryAttachment(index: index + 1)
+                         }
+                     } else {
+                         tryAttachment(index: index + 1)
+                     }
+                 }
+             } else {
+                 tryAttachment(index: index + 1)
+             }
+         }
+         
+         func tryAttachment(index: Int) {
+             guard index < attachments.count else {
+                 self.closeExtension()
+                 return
+             }
+             let attachment = attachments[index]
+             if attachment.hasItemConformingToTypeIdentifier("public.plain-text") {
+                 attachment.loadItem(forTypeIdentifier: "public.plain-text", options: nil) { (data, error) in
+                     if let text = data as? String {
+                         let (url, name) = extractNameAndURL(from: text)
+                         if let url = url {
+                             handleURLAndName(url, name)
+                         } else {
+                             checkURLAttachment(attachment: attachment, index: index)
+                         }
+                     } else {
+                         checkURLAttachment(attachment: attachment, index: index)
+                     }
+                 }
+             } else {
+                 checkURLAttachment(attachment: attachment, index: index)
+             }
+         }
+         
+         tryAttachment(index: 0)
      }
+     
+    private func presentSwiftUIView(url: URL, preExtractedName: String?) {
+        let rootView = ShareExtensionView(
+            onClose: { [weak self] in
+                self?.closeExtension()
+            },
+            onExtractURL: { completion in
+                completion(url, preExtractedName)
+            },
+            onOpenApp: { [weak self] in
+                guard let self = self else { return }
+                self.openAppURLScheme()
+            }
+        )
+        
+        let host = UIHostingController(rootView: rootView)
+        host.view.backgroundColor = .clear
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        
+        addChild(host)
+        view.addSubview(host.view)
+        
+        NSLayoutConstraint.activate([
+            host.view.topAnchor.constraint(equalTo: view.topAnchor),
+            host.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            host.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: view.trailingAnchor)
+        ])
+        
+        host.didMove(toParent: self)
+        self.hostingController = host
+        
+        // Hide the original UIKit views
+        UIView.animate(withDuration: 0.2) {
+            self.backgroundView.alpha = 0
+            self.cardView.alpha = 0
+        }
+    }
+    
+    private func openAppURLScheme() {
+        guard let url = URL(string: "pubo://") else { return }
+        var responder: UIResponder? = self
+        while responder != nil {
+            if let application = responder as? UIApplication {
+                application.perform(NSSelectorFromString("openURL:"), with: url)
+                break
+            }
+            responder = responder?.next
+        }
+    }
     
     private func processShareURL(_ url: URL) {
         print("🔗 [ShareExt] Processing URL: \(url)")
-        
-        // 模擬一點延遲讓使用者看到 Loading 動畫 (UX 優化)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             self.sendURLToPuboBackend(url: url) { [weak self] taskId in
                 guard let self = self else { return }
                 self.saveTaskLocally(taskId: taskId)
-                
                 DispatchQueue.main.async {
                     self.showSuccessState(taskId: taskId)
                 }

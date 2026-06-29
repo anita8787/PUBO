@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 firebase-admin
+google-cloud-firestore
 sqlalchemy
 pydantic
 pydantic-settings

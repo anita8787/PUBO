@@ -24,6 +24,18 @@ struct TripTrashView: View {
                             .frame(width: 32, height: 32).background(Color.gray.opacity(0.1)).clipShape(Circle())
                     }
                     Spacer()
+                    if !trashManager.entries.isEmpty {
+                        Button {
+                            trashManager.entries.removeAll()
+                            if let data = try? JSONEncoder().encode(trashManager.entries) {
+                                UserDefaults.standard.set(data, forKey: "pubo_trip_trash_v1")
+                            }
+                        } label: {
+                            Text("清空").font(.system(size: 14, weight: .bold)).foregroundColor(.red)
+                                .padding(.horizontal, 12).padding(.vertical, 6)
+                                .background(Color.red.opacity(0.1)).cornerRadius(12)
+                        }
+                    }
                 }
             }
             .padding(.horizontal, 20).padding(.vertical, 16)
@@ -75,6 +87,16 @@ struct TripTrashView: View {
                                             .cornerRadius(20)
                                     }
                                     .disabled(restoringId != nil)
+                                    
+                                    Button {
+                                        trashManager.remove(entry)
+                                    } label: {
+                                        Image(systemName: "trash")
+                                            .font(.system(size: 13, weight: .bold)).foregroundColor(.red)
+                                            .padding(8)
+                                            .background(Color.red.opacity(0.1))
+                                            .clipShape(Circle())
+                                    }
                                 }
                                 .padding(14)
                                 .background(Color.white)

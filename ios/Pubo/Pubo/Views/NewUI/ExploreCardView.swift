@@ -7,12 +7,13 @@ struct ExploreCardView: View {
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             // Image
-            AsyncImage(url: URL(string: imageUrl)) { image in
+            CachedAsyncImage(url: URL(string: imageUrl)) { image in
                 image
                     .resizable()
                     .aspectRatio(contentMode: .fill)
             } placeholder: {
-                Color.gray.opacity(0.3)
+                Rectangle()
+                    .fill(Color.gray.opacity(0.3))
             }
             .frame(width: 120, height: 160)
             .clipped()

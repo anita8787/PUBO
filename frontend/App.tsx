@@ -11,8 +11,9 @@ import SearchView from './components/SearchView';
 import ProfileView from './components/ProfileView';
 import MapView from './components/MapView';
 import CreateTripModal from './components/CreateTripModal';
+import PerformanceMonitor from './components/PerformanceMonitor';
 import { Tab, Post, Trip, SavedItem, ItineraryDay, ItinerarySpot } from './types';
-import { Search, User, Sparkles, Heart, Star, Plane, ChevronRight } from 'lucide-react';
+import { Search, User, Sparkles, Heart, Star, Plane, ChevronRight, Timer } from 'lucide-react';
 
 const initialSpots: ItinerarySpot[] = [
     { id: '1', time: '11:00', duration: '11:00營業', name: '東京車站', category: 'spot', image: 'https://images.unsplash.com/photo-1536098561742-ca998e48cbcc?q=80&w=400&auto=format&fit=crop', subLabel: '10分鐘', notes: ['要逛的店', 'kite', 'paroco'], travelToNext: { time: '10分鐘', distance: '2.4公里', type: 'train' } },
@@ -102,6 +103,7 @@ const App: React.FC = () => {
                             </div>
                         </div>
                         <div className="flex items-center gap-3">
+                            <button onClick={() => window.dispatchEvent(new CustomEvent('pubo_open_performance'))} className="w-10 h-10 border-2 border-pubo-navy bg-pubo-cardYellow rounded-full flex items-center justify-center text-pubo-navy active:bg-pubo-navy active:text-white transition-colors duration-200" title="效能優化器"><Timer size={20} strokeWidth={2.5} /></button>
                             <button onClick={() => setActiveTab(Tab.SEARCH)} className="w-10 h-10 border-2 border-pubo-navy bg-white rounded-full flex items-center justify-center text-pubo-navy active:bg-pubo-navy active:text-white transition-colors duration-200"><Search size={22} strokeWidth={2.5} /></button>
                             <button onClick={() => setActiveTab(Tab.PROFILE)} className="w-10 h-10 border-2 border-pubo-navy bg-white rounded-full flex items-center justify-center text-pubo-navy active:bg-pubo-navy active:text-white transition-colors duration-200"><User size={22} /></button>
                         </div>
@@ -225,6 +227,7 @@ const App: React.FC = () => {
 
             <SavedPlacesModal isOpen={isSavedPlacesOpen} onClose={() => setIsSavedPlacesOpen(false)} onSelect={(item) => { }} />
             <CreateTripModal isOpen={isCreateTripModalOpen} onClose={() => setIsCreateTripModalOpen(false)} onCreate={() => { }} />
+            <PerformanceMonitor />
         </div>
     );
 };

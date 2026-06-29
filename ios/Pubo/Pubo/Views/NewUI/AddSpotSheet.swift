@@ -15,6 +15,8 @@ struct AddSpotSheet: View {
     // UI State
     @State private var searchText = ""
     @State private var activeSheet: AddSpotMode? = nil
+    @FocusState private var isSearchFocused: Bool
+    @State private var keyboardHeight: CGFloat = 0
     
     // Custom Mode State
     @State private var isCustomMode = false
@@ -87,6 +89,7 @@ struct AddSpotSheet: View {
                         .font(.system(size: 20))
                     
                     TextField(searchPlaceholder, text: $searchText)
+                        .focused($isSearchFocused)
                         .font(.system(size: 16))
                         .foregroundColor(.black)
                         .submitLabel(.search)
@@ -156,16 +159,23 @@ struct AddSpotSheet: View {
                 }
             }
             .padding(.horizontal, 24)
-            .padding(.bottom, 60) // Increased to clear safe area and feel more "up"
+            .padding(.bottom, keyboardHeight > 0 ? keyboardHeight + 10 : 60) // Increased to clear safe area and feel more "up"
             .zIndex(100) // Ensure list stays on top
         }
         .padding(.top, 20)
         .background(Color.clear) 
-        .presentationDetents([.height(searchService.suggestions.isEmpty ? 220 : 500)])
-        .presentationCornerRadius(32)
-        .presentationBackground(.clear) 
-        .presentationDragIndicator(.hidden)
-        // ... rest of sheet ...
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { notification in
+            if let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    self.keyboardHeight = frame.height
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            withAnimation(.easeOut(duration: 0.16)) {
+                self.keyboardHeight = 0
+            }
+        }
         .sheet(item: $activeSheet) { mode in
             switch mode {
             case .smartImport:
@@ -309,12 +319,12 @@ struct SmartImportView: View {
                 }
             }
         }
-        .presentationDetents(discoveredSpots.isEmpty ? [.height(350)] : [.large])
+        .presentationDetents(discoveredSpots.isEmpty ? [.height(260)] : [.large])
         .presentationCornerRadius(32)
     }
     
     private var importInputView: some View {
-        VStack(spacing: 20) {
+        VStack {
             // Link Import
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
@@ -361,40 +371,8 @@ struct SmartImportView: View {
             .cornerRadius(20)
             .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.black, lineWidth: 2))
             .padding(.horizontal)
-            
-            // Screenshot Import
-            PhotosPicker(selection: $selectedScreenshot, matching: .images, photoLibrary: .shared()) {
-                HStack {
-                    if isProcessing {
-                        ProgressView()
-                            .tint(.black)
-                            .padding(.trailing, 4)
-                    } else {
-                        Image(systemName: "photo.on.rectangle")
-                            .font(.title)
-                            .foregroundColor(.black)
-                    }
-                    VStack(alignment: .leading) {
-                        Text(isProcessing ? "圖片辨識中..." : "截圖識別")
-                            .font(.headline)
-                            .foregroundColor(.black)
-                    }
-                    Spacer()
-                }
-                .padding()
-                .background(Color.gray.opacity(0.1))
-                .cornerRadius(20)
-            }
-            .disabled(isProcessing)
-            .padding(.horizontal)
-            .onChange(of: selectedScreenshot) { old, newValue in
-                if let newValue {
-                    handleScreenshotUpload(item: newValue)
-                }
-            }
-            
-            Spacer()
         }
+        .padding(.bottom, 20)
     }
     
     private func handleScreenshotUpload(item: PhotosPickerItem) {
@@ -416,15 +394,25 @@ struct SmartImportView: View {
                 var spots: [ItinerarySpot] = []
                 for info in result.1 {
                     let place = info.place
+                    var cleanName = place.name.replacingOccurrences(of: "+", with: " ")
+                    // Clean up address parts appended to Japanese Google Maps places
+                    if let range = cleanName.range(of: " 1F ") { cleanName = String(cleanName[..<range.lowerBound]) }
+                    if let range = cleanName.range(of: " 2F ") { cleanName = String(cleanName[..<range.lowerBound]) }
+                    if let range = cleanName.range(of: " 3F ") { cleanName = String(cleanName[..<range.lowerBound]) }
+                    if let range = cleanName.range(of: " Chome") { cleanName = String(cleanName[..<range.lowerBound]) }
+                    if let range = cleanName.range(of: " B1 ") { cleanName = String(cleanName[..<range.lowerBound]) }
+                    
                     var spot = ItinerarySpot.empty()
-                    spot.name = place.name
+                    spot.name = cleanName
                     spot.latitude = place.latitude
                     spot.longitude = place.longitude
                     spot.imageUrl = place.imageUrl
                     spot.googlePlaceId = place.googlePlaceId
                     
+                    await enrichSpotWithGooglePlaces(spot: &spot)
+                    
                     spot.place = PlaceInfo(
-                        name: place.name,
+                        name: cleanName,
                         placeId: place.placeId,
                         address: place.address,
                         latitude: place.latitude,
@@ -544,115 +532,21 @@ struct SmartImportView: View {
     private func handleSmartImport() {
         guard !linkText.isEmpty else { return }
         
-        // ⚡️ 快速防重複偵測 (ID + 標題)
-        if DataService.shared.isPostCollected(url: linkText) {
-            errorMessage = "這則貼文已經在收藏庫中囉！"
-            isProcessing = false
-            return
-        }
+        let urls = DataService.shared.extractURLs(from: linkText)
         
-        isProcessing = true
-        errorMessage = nil
-        
-        Task {
-            do {
-                // 1. Submit task
-                let taskId = try await DataService.shared.submitShareTask(url: linkText)
-                
-                // 2. Poll result
-                guard let result = await DataService.shared.pollTaskResult(taskId: taskId) else {
-                    await MainActor.run {
-                        self.errorMessage = "識別超時或失敗，請檢查連結"
-                        self.isProcessing = false
-                    }
-                    return
-                }
-                
-                // 3. Save to Library (Collections) - NEW: Sync to collections
-                DataService.shared.saveContent(result.0, relatedPlaces: result.1)
-                
-                // 4. Transform result to spots for preview
-                var spots: [ItinerarySpot] = []
-                let resolver = POIResolverService()
-                let destination = trip.destination ?? ""
-                let targetRegion = region(for: destination)
-                
-                for info in result.1 {
-                    let place = info.place
-                    var spot = ItinerarySpot.empty()
-                    spot.name = place.name
-                    spot.latitude = place.latitude
-                    spot.longitude = place.longitude
-                    spot.imageUrl = place.imageUrl
-                    spot.googlePlaceId = place.googlePlaceId
-                    
-                    // If coordinates are zero, try a quick repair with destination bias
-                    if spot.latitude == 0 || spot.latitude == nil {
-                        do {
-                            let repaired = try await resolver.resolvePOI(query: spot.name, region: targetRegion, countryName: destination)
-                            
-                            // Skip distance boundary filter since users may import international places into local trips
-                            let validRepaired = repaired
-                            
-                            if let first = validRepaired.first {
-                                spot.latitude = first.latitude
-                                spot.longitude = first.longitude
-                                spot.place = PlaceInfo(
-                                    name: first.name,
-                                    placeId: spot.id,
-                                    address: first.address,
-                                    latitude: first.latitude,
-                                    longitude: first.longitude,
-                                    category: spot.category?.rawValue ?? "spot",
-                                    rating: nil,
-                                    userRatingsTotal: nil,
-                                    openingHours: nil,
-                                    imageUrl: nil
-                                )
-                            }
-                        } catch {
-                            print("⚠️ SmartImport inline repair failed for \(spot.name): \(error)")
-                        }
-                    }
-                    
-                    // Map Category (if not already set by repair)
-                    if spot.place == nil {
-                        spot.place = PlaceInfo(
-                            name: place.name,
-                            placeId: place.placeId,
-                            address: place.address,
-                            latitude: spot.latitude,
-                            longitude: spot.longitude,
-                            category: place.category,
-                            rating: place.rating,
-                            userRatingsTotal: place.userRatingCount,
-                            openingHours: nil,
-                            imageUrl: nil
-                        )
-                    }
-                    
-                    if let cat = place.category?.lowercased() {
-                        if cat.contains("food") { spot.category = .food }
-                        else if cat.contains("lodging") { spot.category = .accommodation }
-                        else { spot.category = .spot }
-                    }
-                    
-                    spots.append(spot)
-                }
-                
-                await MainActor.run {
-                    self.discoveredSpots = spots
-                    // Default select all
-                    self.selectedSpotIds = Set(spots.map { $0.id })
-                    self.isProcessing = false
-                }
-            } catch {
-                await MainActor.run {
-                    self.errorMessage = "解析錯誤: \(error.localizedDescription)"
-                    self.isProcessing = false
-                }
+        if urls.count == 1 {
+            let singleUrl = urls[0]
+            if DataService.shared.isPostCollected(url: singleUrl) {
+                errorMessage = "✅ 這則貼文已在你的收藏庫中，不需要重複收藏。"
+                isProcessing = false
+                return
             }
         }
+        
+        // 交給背景懸浮佇列處理
+        errorMessage = nil
+        DataService.shared.startSmartImport(url: linkText)
+        onDismiss()
     }
     
     private func region(for destination: String) -> MKCoordinateRegion? {
@@ -674,6 +568,76 @@ struct SmartImportView: View {
             )
         }
         return nil
+    }
+    
+    private func enrichSpotWithGooglePlaces(spot: inout ItinerarySpot) async {
+        if let placeId = spot.googlePlaceId, !placeId.isEmpty {
+            // We have a placeId — use Place Details for accurate name + coords + address
+            let urlString = "https://maps.googleapis.com/maps/api/place/details/json?place_id=\(placeId)&fields=geometry,name,formatted_address&key=\(Secrets.googleAPIKey)&language=zh-TW"
+            if let url = URL(string: urlString),
+               let (data, _) = try? await URLSession.shared.data(from: url),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let res = json["result"] as? [String: Any] {
+                
+                // 保留原本的景點名稱
+                // if let localName = res["name"] as? String {
+                //     spot.name = localName
+                // }
+                if let geometry = res["geometry"] as? [String: Any],
+                   let location = geometry["location"] as? [String: Double],
+                   let lat = location["lat"], let lng = location["lng"] {
+                    spot.latitude = lat
+                    spot.longitude = lng
+                }
+                // Also save the formatted address if we don't have one yet
+                if spot.place?.address == nil, let addr = res["formatted_address"] as? String {
+                    if var p = spot.place {
+                        p.address = addr
+                        spot.place = p
+                    }
+                }
+            }
+        } else {
+            // No placeId — use Text Search as fallback
+            // Use the decoded spot name (not URL-encoded) for the query parameter
+            let rawName = spot.name
+            guard let encodedName = rawName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return }
+            
+            let lat = spot.latitude ?? 0.0
+            let lng = spot.longitude ?? 0.0
+            
+            // Only add location bias if we actually have valid coordinates
+            let locationParam = (lat != 0.0 && lng != 0.0) ? "&location=\(lat),\(lng)&radius=1000" : ""
+            let urlString = "https://maps.googleapis.com/maps/api/place/textsearch/json?query=\(encodedName)\(locationParam)&language=zh-TW&key=\(Secrets.googleAPIKey)"
+            
+            if let url = URL(string: urlString),
+               let (data, _) = try? await URLSession.shared.data(from: url),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let results = json["results"] as? [[String: Any]],
+               let firstRes = results.first {
+                
+                if let pId = firstRes["place_id"] as? String {
+                    spot.googlePlaceId = pId
+                }
+                // 保留原本的景點名稱
+                // if let localName = firstRes["name"] as? String {
+                //     spot.name = localName
+                // }
+                if let geometry = firstRes["geometry"] as? [String: Any],
+                   let location = geometry["location"] as? [String: Double],
+                   let resLat = location["lat"], let resLng = location["lng"] {
+                    spot.latitude = resLat
+                    spot.longitude = resLng
+                }
+                if let addr = firstRes["formatted_address"] as? String {
+                    let existingPlace = spot.place
+                    if var p = existingPlace, (p.address == nil || p.address!.isEmpty) {
+                        p.address = addr
+                        spot.place = p
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1038,7 +1002,7 @@ struct SavedPlacesResultView: View {
                 }
                 
                 // Places List
-                let places = filteredContent.flatMap { $0.places }
+                let places = filteredContent.flatMap { $0.places }.filter { $0.isSaved }
                 
                 if places.isEmpty {
                      VStack {

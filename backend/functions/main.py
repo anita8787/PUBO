@@ -26,7 +26,7 @@ from app.models import schemas
 from app.models.database import (
     get_db, init_db, Task, SessionLocal,
     AIAnalysisCache, CuratedPost, Content,
-    Place, ContentPlaceAssociation
+    Place, ContentPlaceAssociation, PlaceCache
 )
 from app.services.places_service import PlacesService
 from app.services.apify_service import ApifyService
@@ -71,7 +71,7 @@ async def debug_places(query: str):
         headers = {
             "Content-Type": "application/json",
             "X-Goog-Api-Key": places_service.api_key,
-            "X-Goog-FieldMask": "places.name,places.id,places.formattedAddress,places.location,places.types,places.rating,places.userRatingCount,places.displayName,places.primaryType,places.currentOpeningHours,places.regularOpeningHours"
+            "X-Goog-FieldMask": "places.name,places.id,places.formattedAddress,places.location,places.types,places.displayName,places.primaryType"
         }
         payload = {"textQuery": query, "maxResultCount": 1, "languageCode": "zh-TW"}
         import requests as req
@@ -96,6 +96,50 @@ async def process_share_task(task_id: str, url: str):
 
         source_type = "instagram"
         print(f"TASK {task_id}: 開始處理 {url}")
+
+        # --- Layer 1: URL Cache (Check if content already exists) ---
+        existing_content = db.query(Content).filter(Content.source_url == url).first()
+        if existing_content:
+            print(f"🎯 [Cache Hit] Layer 1: URL Cache Hit for {url}")
+            content_base = schemas.ContentBase(
+                source_type=existing_content.source_type,
+                source_url=existing_content.source_url,
+                title=existing_content.title,
+                text=existing_content.text,
+                author_name=existing_content.author_name,
+                author_avatar_url=existing_content.author_avatar_url,
+                preview_thumbnail_url=existing_content.preview_thumbnail_url,
+                published_at=existing_content.published_at
+            )
+            suggested_places = []
+            for assoc in existing_content.place_associations:
+                place = assoc.place
+                suggested_places.append(schemas.ContentPlaceInfo(
+                    place=schemas.PlaceBase(
+                        place_id=place.place_id,
+                        name=place.name,
+                        address=place.address,
+                        latitude=place.latitude,
+                        longitude=place.longitude,
+                        category=place.category,
+                        image_url=place.image_url,
+                        rating=place.rating,
+                        user_ratings_total=place.user_ratings_total,
+                        opening_hours=place.opening_hours
+                    ),
+                    evidence_text=assoc.evidence_text,
+                    confidence_score=assoc.confidence_score
+                ))
+            extraction_response = schemas.ExtractionResponse(
+                content=content_base,
+                suggested_places=suggested_places
+            )
+            task.result = json.loads(extraction_response.json())
+            task.status = "completed"
+            task.progress = 1.0
+            db.commit()
+            return
+        # --- End Layer 1 ---
 
         scraped_data = None
         if not url.startswith("http://") and not url.startswith("https://"):
@@ -129,60 +173,93 @@ async def process_share_task(task_id: str, url: str):
             display_name    = p.get("name", "Unknown")
             inferred_country = p.get("country", "")
 
-            google_place = await run_in_threadpool(places_service.search_place, f"{inferred_country} {search_name}")
-            if not google_place:
-                google_place = await run_in_threadpool(places_service.search_place, f"{search_name} {p.get('city', '')}")
-            if not google_place:
-                google_place = await run_in_threadpool(places_service.search_place, display_name)
+            # --- Layer 2: Place Cache ---
+            from app.models.database import PlaceCache
+            from datetime import datetime, timedelta
+            
+            cache_key = f"{inferred_country}_{p.get('city', '')}_{search_name}"
+            
+            cached_place = db.query(PlaceCache).filter(PlaceCache.search_key == cache_key).first()
+            if cached_place and cached_place.updated_at > datetime.utcnow() - timedelta(days=7):
+                if cached_place.status == "not_found":
+                    print(f"🛑 [Cache Hit] Layer 2: Negative Cache for {cache_key}. Skipping...")
+                    return None
+                elif cached_place.place:
+                    print(f"🎯 [Cache Hit] Layer 2: Found {cache_key} in Place DB")
+                    db_p = cached_place.place
+                    place_data = {
+                        "place_id": db_p.place_id,
+                        "name": db_p.name,
+                        "address": db_p.address,
+                        "latitude": db_p.latitude,
+                        "longitude": db_p.longitude,
+                        "category": db_p.category,
+                        "image_url": db_p.image_url,
+                        "rating": db_p.rating,
+                        "user_ratings_total": db_p.user_ratings_total,
+                        "opening_hours": db_p.opening_hours,
+                        "google_place_id": cached_place.google_place_id
+                    }
+                    return schemas.ContentPlaceInfo(
+                        place=schemas.PlaceBase(**place_data),
+                        evidence_text=p.get("evidence_text"),
+                        confidence_score=p.get("confidence_score", 0.0)
+                    )
 
-            ai_fallback_data = None
+            # --- New 2-Stage Fallback Search ---
+            # Stage 1: {Country} {City} {Name}
+            stage_1_query = f"{inferred_country} {p.get('city', '')} {search_name}".strip()
+            print(f"🔍 [Functions] Stage 1 Search: {stage_1_query}")
+            google_place = await run_in_threadpool(places_service.search_place, stage_1_query)
+            
+            # Stage 2: {Name} only (Loose Search)
             if not google_place:
-                ai_fallback_data = await run_in_threadpool(nlp_service.ai_geocoding, display_name, inferred_country, p.get('city', ''))
+                stage_2_query = display_name
+                print(f"🔄 [Functions] Stage 1 failed. Stage 2 (Loose Search): {stage_2_query}")
+                google_place = await run_in_threadpool(places_service.search_place, stage_2_query)
 
+            if not google_place:
+                print(f"⚠️ [Functions] All Places API searches failed for {display_name}. Saving to Negative Cache and Skipping...")
+                if cached_place:
+                    cached_place.status = "not_found"
+                    cached_place.updated_at = datetime.utcnow()
+                else:
+                    new_cache = PlaceCache(search_key=cache_key, status="not_found")
+                    db.add(new_cache)
+                db.commit()
+                return None
+
+            real_id = google_place.get("name", "").split("/")[-1] if "/" in google_place.get("name", "") else google_place.get("id")
+            
             place_data = {
-                "place_id": f"temp_{random.randint(1000, 9999)}",
+                "place_id": real_id,
+                "google_place_id": real_id,
                 "name": display_name,
-                "address": None,
-                "latitude": 0.0,
-                "longitude": 0.0,
-                "category": p.get("category", "其他"),
-                "google_place_id": None
+                "address": google_place.get("formattedAddress", ""),
+                "latitude": google_place.get("location", {}).get("latitude", 0.0),
+                "longitude": google_place.get("location", {}).get("longitude", 0.0),
+                "category": google_place.get("primaryType", "其他").replace("_", " ").title() if "primaryType" in google_place else p.get("category", "其他"),
+                "rating": google_place.get("rating"),
+                "user_ratings_total": google_place.get("userRatingCount"),
+                "opening_hours": google_place.get("regularOpeningHours")
             }
-
-            if google_place:
-                real_id = google_place.get("name", "").split("/")[-1] if "/" in google_place.get("name", "") else google_place.get("id")
-                place_data["place_id"] = real_id
-                place_data["google_place_id"] = real_id
-                place_data["address"] = google_place.get("formattedAddress", "")
-                location = google_place.get("location", {})
-                place_data["latitude"]  = location.get("latitude", 0.0)
-                place_data["longitude"] = location.get("longitude", 0.0)
-                place_data["rating"] = google_place.get("rating")
-                place_data["user_ratings_total"] = google_place.get("userRatingCount")
-                place_data["opening_hours"] = google_place.get("regularOpeningHours")
-                place_data["open_now"] = google_place.get("currentOpeningHours", {}).get("openNow")
-                if "primaryType" in google_place:
-                    place_data["category"] = google_place["primaryType"].replace("_", " ").title()
-            elif ai_fallback_data:
-                place_data["address"]   = ai_fallback_data.get("address")
-                place_data["latitude"]  = ai_fallback_data.get("latitude", 0.0)
-                place_data["longitude"] = ai_fallback_data.get("longitude", 0.0)
 
             if not place_data.get("image_url") and post_thumbnail:
                 place_data["image_url"] = post_thumbnail
-            if not place_data.get("image_url"):
-                fallback_img = await run_in_threadpool(image_service.fetch_fallback_image, search_name)
-                if fallback_img:
-                    place_data["image_url"] = fallback_img
             if place_data.get("image_url"):
-                permanent_url = await run_in_threadpool(image_service.upload_to_supabase, place_data["image_url"])
+                permanent_url = await run_in_threadpool(image_service.upload_to_firebase, place_data["image_url"])
                 place_data["image_url"] = permanent_url
 
-            return schemas.ContentPlaceInfo(
+            # Create transient Place object to return, the caller loop will save it and update PlaceCache
+            info_to_return = schemas.ContentPlaceInfo(
                 place=schemas.PlaceBase(**place_data),
                 evidence_text=p.get("evidence_text"),
                 confidence_score=p.get("confidence_score", 0.0)
             )
+            # Attach cache_key for the caller to save it
+            setattr(info_to_return, "_cache_key", cache_key)
+            setattr(info_to_return, "_google_place_id", real_id)
+            return info_to_return
 
         post_thumb = scraped_data.get("preview_thumbnail_url")
         if post_thumb:
@@ -203,7 +280,7 @@ async def process_share_task(task_id: str, url: str):
             preview_thumbnail_url=scraped_data.get("preview_thumbnail_url"),
             published_at=None
         )
-        extraction_response = schemas.ExtractionResponse(content=content_base, suggested_places=enriched_places)
+        extraction_response = schemas.ExtractionResponse(content=content_base, suggested_places=[e for e in enriched_places if e is not None])
 
         db_content = db.query(Content).filter(Content.source_url == url).first()
         if not db_content:
@@ -218,7 +295,10 @@ async def process_share_task(task_id: str, url: str):
             db.commit()
             db.refresh(db_content)
 
-        for info in enriched_places:
+        from app.models.database import PlaceCache
+        from datetime import datetime
+
+        for info in [e for e in enriched_places if e is not None]:
             p = info.place
             db_place = db.query(Place).filter(Place.place_id == p.place_id).first() if p.place_id else None
             if not db_place:
@@ -238,9 +318,26 @@ async def process_share_task(task_id: str, url: str):
             ).first()
             if not assoc:
                 db.add(ContentPlaceAssociation(
-                    content_id=db_content.id, place_id=db_place.id,
-                    evidence_text=info.evidence_text, confidence_score=info.confidence_score
+                    content_id=db_content.id,
+                    place_id=db_place.id,
+                    evidence_text=info.evidence_text,
+                    confidence_score=info.confidence_score
                 ))
+
+            # --- Save to PlaceCache ---
+            if hasattr(info, "_cache_key"):
+                cache_key = info._cache_key
+                google_pid = info._google_place_id
+                db_cache = db.query(PlaceCache).filter(PlaceCache.search_key == cache_key).first()
+                if not db_cache:
+                    db_cache = PlaceCache(search_key=cache_key, place_id=db_place.id, google_place_id=google_pid, status="found")
+                    db.add(db_cache)
+                else:
+                    db_cache.place_id = db_place.id
+                    db_cache.google_place_id = google_pid
+                    db_cache.status = "found"
+                    db_cache.updated_at = datetime.utcnow()
+
         db.commit()
 
         task.result = json.loads(extraction_response.json())
@@ -298,98 +395,6 @@ async def list_places(db: Session = Depends(get_db)):
         image_url=p.image_url, rating=p.rating,
         user_ratings_total=p.user_ratings_total, opening_hours=p.opening_hours
     ) for p in places]
-
-
-@app.post("/api/v1/analyze/place", response_model=schemas.AnalyzeResponse)
-async def analyze_place(request: schemas.AnalyzeRequest, db: Session = Depends(get_db)):
-    cache_entry = db.query(AIAnalysisCache).filter(
-        AIAnalysisCache.place_name == request.name,
-        AIAnalysisCache.address == request.address
-    ).first()
-    is_template = False
-    if cache_entry:
-        res = cache_entry.result
-        desc = res.get("description", "")
-        template_keywords = ["備受好評", "熱門地點", "值得一訪", "附近交通可能較擁擠"]
-        if any(k in desc for k in template_keywords):
-            is_template = True
-            db.delete(cache_entry)
-            db.commit()
-    if cache_entry and not is_template:
-        res = cache_entry.result
-        return schemas.AnalyzeResponse(
-            description=res.get("description", ""),
-            pro_comment=res.get("pro_comment", ""),
-            con_comment=res.get("con_comment", "")
-        )
-    result = await run_in_threadpool(
-        nlp_service.generate_place_description,
-        request.name, request.address, request.country, request.city
-    )
-    if is_template:
-        cache_entry.result = result
-        db.add(cache_entry)
-    else:
-        db.add(AIAnalysisCache(place_name=request.name, address=request.address, result=result))
-    db.commit()
-    return schemas.AnalyzeResponse(
-        description=result.get("description", ""),
-        pro_comment=result.get("pro_comment", ""),
-        con_comment=result.get("con_comment", "")
-    )
-
-
-@app.post("/api/v1/analyze/screenshot", response_model=schemas.ExtractionResponse)
-async def analyze_screenshot(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    import asyncio
-    image_data = await file.read()
-    extracted_places = await run_in_threadpool(nlp_service.extract_places_from_image, image_data, file.content_type)
-    if not extracted_places:
-        raise HTTPException(status_code=400, detail="無法從截圖中辨識出任何景點資訊")
-
-    async def enrich_for_screenshot(p):
-        search_name     = p.get("search_query", p.get("name", "Unknown"))
-        display_name    = p.get("name", "Unknown")
-        inferred_country = p.get("country", "")
-        google_place = await run_in_threadpool(places_service.search_place, f"{inferred_country} {search_name}")
-        if not google_place:
-            google_place = await run_in_threadpool(places_service.search_place, f"{search_name} {p.get('city', '')}")
-        if not google_place:
-            google_place = await run_in_threadpool(places_service.search_place, display_name)
-        ai_fallback_data = None
-        if not google_place:
-            ai_fallback_data = await run_in_threadpool(nlp_service.ai_geocoding, display_name, inferred_country, p.get('city', ''))
-        place_data = {"place_id": f"temp_{random.randint(1000, 9999)}", "name": display_name, "address": None, "latitude": 0.0, "longitude": 0.0, "category": p.get("category", "其他"), "google_place_id": None}
-        if google_place:
-            place_data["place_id"] = google_place.get("name", "").split("/")[-1] if "/" in google_place.get("name", "") else google_place.get("id")
-            place_data["google_place_id"] = place_data["place_id"]
-            place_data["address"] = google_place.get("formattedAddress", "")
-            location = google_place.get("location", {})
-            place_data["latitude"]  = location.get("latitude", 0.0)
-            place_data["longitude"] = location.get("longitude", 0.0)
-            place_data["rating"] = google_place.get("rating")
-            place_data["user_ratings_total"] = google_place.get("userRatingCount")
-            place_data["opening_hours"] = google_place.get("regularOpeningHours")
-            place_data["open_now"] = google_place.get("currentOpeningHours", {}).get("openNow")
-            if "primaryType" in google_place:
-                place_data["category"] = google_place["primaryType"].replace("_", " ").title()
-        elif ai_fallback_data:
-            place_data["address"]   = ai_fallback_data.get("address")
-            place_data["latitude"]  = ai_fallback_data.get("latitude", 0.0)
-            place_data["longitude"] = ai_fallback_data.get("longitude", 0.0)
-        fallback_img = await run_in_threadpool(image_service.fetch_fallback_image, search_name)
-        if fallback_img:
-            permanent_url = await run_in_threadpool(image_service.upload_to_supabase, fallback_img)
-            place_data["image_url"] = permanent_url
-        return schemas.ContentPlaceInfo(place=schemas.PlaceBase(**place_data), evidence_text=p.get("evidence_text"), confidence_score=p.get("confidence_score", 0.0))
-
-    enriched_places = await asyncio.gather(*(enrich_for_screenshot(p) for p in extracted_places))
-    content_base = schemas.ContentBase(
-        source_type="screenshot", source_url=f"screenshot_{uuid.uuid4().hex[:8]}",
-        title="來自截圖的景點分析", text="", author_name="Me",
-        author_avatar_url=None, preview_thumbnail_url=None, published_at=None
-    )
-    return schemas.ExtractionResponse(content=content_base, suggested_places=enriched_places)
 
 
 @app.get("/api/v1/curated", response_model=List[schemas.CuratedPostResponse])

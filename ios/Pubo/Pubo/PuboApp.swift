@@ -23,6 +23,7 @@ struct PuboApp: App {
     let container: ModelContainer
     @State private var pendingImport: PendingImport?
     @State private var showTaskQueue: Bool = false
+    @State private var showLinkQueueSheet: Bool = false
     @UIApplicationDelegateAdaptor(AppDelegate.self) var delegate
     init() {
         do {
@@ -34,10 +35,18 @@ struct PuboApp: App {
                 SDItinerarySpot.self,
                 SDOfflineTask.self
             ])
+            let groupURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.anita.Pubo")!
+            let appSupportURL = groupURL.appendingPathComponent("Library/Application Support", isDirectory: true)
+            
+            // 確保資料夾存在，否則實體機會報錯 (Sandbox access to file-write-create denied)
+            try? FileManager.default.createDirectory(at: appSupportURL, withIntermediateDirectories: true, attributes: nil)
+            
+            let storeURL = appSupportURL.appendingPathComponent("default.store")
+            
             // 輕量級 Migration：新增欄位有預設値，不需要資料転移
             let modelConfiguration = ModelConfiguration(
                 schema: schema,
-                isStoredInMemoryOnly: false
+                url: storeURL
             )
             container = try ModelContainer(
                 for: schema,
@@ -55,10 +64,13 @@ struct PuboApp: App {
     @StateObject private var backgroundTaskManager = BackgroundTaskManager.shared
     @StateObject private var authManager = AuthManager.shared
     @State private var pendingJoinCode: String? = nil
+    @Environment(\.scenePhase) private var scenePhase
+    
     var body: some Scene {
         WindowGroup {
             ZStack {
-                NewHomeView()
+                if authManager.isSignedIn {
+                    NewHomeView()
                     .environmentObject(tripManager)
                     .environmentObject(dataService)
                     .environmentObject(locationManager)
@@ -72,6 +84,17 @@ struct PuboApp: App {
                         tripManager.modelContext = container.mainContext
                         tripManager.refreshTrips()
                         locationManager.requestPermission()
+                        
+                        // Sync App Group Data on first launch
+                        dataService.syncPendingPlaceActions(tripManager: tripManager)
+                        dataService.syncTripsToAppGroup()
+                    }
+                    .onChange(of: scenePhase) { _, newPhase in
+                        if newPhase == .active {
+                            DataService.shared.processPendingShareTasks()
+                            DataService.shared.syncPendingPlaceActions(tripManager: tripManager)
+                            DataService.shared.syncTripsToAppGroup()
+                        }
                     }
                     .onOpenURL { url in
                         guard url.scheme == "pubo", let host = url.host else { return }
@@ -104,22 +127,29 @@ struct PuboApp: App {
                     .sheet(isPresented: $showTaskQueue) {
                         TaskQueueSheet()
                     }
+                    .sheet(isPresented: $showLinkQueueSheet) {
+                        LinkAnalysisQueueSheet()
+                    }
+                } else {
+                    LoginView()
+                }
                 
                 // 懸浮任務收件匣
                 let hasOfflineTasks = backgroundTaskManager.pendingTaskCount > 0 || backgroundTaskManager.activeTaskCount > 0
-                if dataService.isProcessingLink || dataService.readyImport != nil || hasOfflineTasks {
+                let hasActiveLinkTasks = dataService.activeLinkTasks.contains { $0.status == .pending || $0.status == .analyzing }
+                let hasUnimportedTasks = dataService.activeLinkTasks.contains { $0.status == .completed && !$0.isImported }
+                let hasFailedTasks = dataService.activeLinkTasks.contains { $0.status == .failed }
+                
+                let showFloating = dataService.isProcessingLink || hasActiveLinkTasks || hasUnimportedTasks || hasFailedTasks || dataService.readyImport != nil || hasOfflineTasks
+                
+                if showFloating {
                     FloatingTaskInbox(
-                        isProcessing: dataService.isProcessingLink || backgroundTaskManager.activeTaskCount > 0,
+                        isProcessing: dataService.isProcessingLink || hasActiveLinkTasks || backgroundTaskManager.activeTaskCount > 0,
                         progress: CGFloat(dataService.linkProgress),
-                        hasResult: dataService.readyImport != nil,
-                        pendingOfflineCount: backgroundTaskManager.pendingTaskCount,
+                        hasResult: dataService.readyImport != nil || hasUnimportedTasks || hasFailedTasks,
+                        pendingOfflineCount: backgroundTaskManager.pendingTaskCount + dataService.activeLinkTasks.filter { $0.status == .completed && !$0.isImported }.count,
                         onTap: {
-                            if let ready = dataService.readyImport {
-                                dataService.pendingImport = ready
-                                dataService.readyImport = nil
-                            } else if hasOfflineTasks {
-                                showTaskQueue = true
-                            }
+                            showLinkQueueSheet = true
                         }
                     )
                     .zIndex(100)

@@ -27,6 +27,7 @@ struct NewHomeView: View {
     @State private var selectedCuratedPost: CuratedPost? = nil
     @State private var showingAvatarSelection = false
     @State private var showingAllCuratedPosts = false
+    @State private var showFlightInfoModal = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -89,6 +90,25 @@ struct NewHomeView: View {
                 .transition(.opacity)
                 .zIndex(100) // Ensure on top
             }
+            
+            // Flight Info Overlay (Custom Bottom Drawer)
+            if showFlightInfoModal {
+                Color.black.opacity(0.3)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        withAnimation { showFlightInfoModal = false }
+                    }
+                    .zIndex(201)
+                
+                VStack {
+                    Spacer()
+                    BoardingPassEditSheet(isPresented: $showFlightInfoModal)
+                        .frame(height: UIScreen.main.bounds.height * 0.65)
+                        .transition(.move(edge: .bottom))
+                }
+                .ignoresSafeArea(.all, edges: .bottom)
+                .zIndex(202)
+            }
         }
         .ignoresSafeArea(.keyboard) // 整個 ZStack 不跟隨鍵盤移動
         .ignoresSafeArea(.container, edges: .bottom)
@@ -148,21 +168,21 @@ struct NewHomeView: View {
                             ZStack {
                                 Circle()
                                     .fill(Color.white)
-                                    .frame(width: 68, height: 68)
-                                    .overlay(Circle().stroke(PuboColors.navy, lineWidth: 2.5))
-                                    .retroShadow(color: .black.opacity(0.1), offset: 3)
+                                    .frame(width: 54, height: 54)
+                                    .overlay(Circle().stroke(PuboColors.navy, lineWidth: 2))
+                                    .retroShadow(color: .black.opacity(0.1), offset: 2)
                                 
                                 Image(userGender)
                                     .resizable()
                                     .scaledToFit()
-                                    .frame(width: 58, height: 58)
+                                    .frame(width: 46, height: 46)
                                     .clipShape(Circle())
                             }
                         }
                         
                         VStack(alignment: .leading) {
                             Text("HI! NITA")
-                                .font(.system(size: 28, weight: .black))
+                                .font(.system(size: 24, weight: .black))
                                 .foregroundColor(PuboColors.navy)
                         }
                     }
@@ -188,7 +208,7 @@ struct NewHomeView: View {
                                 .foregroundColor(PuboColors.navy)
                                 .padding(.horizontal, 24)
                             
-                            BoardingPassView()
+                            BoardingPassView(isPresented: $showFlightInfoModal)
                                 .padding(.horizontal, 24)
                         }
                         
@@ -211,7 +231,7 @@ struct NewHomeView: View {
                                 HStack(spacing: 16) {
                                     if dataService.curatedPosts.isEmpty {
                                         // Show skeleton or placeholder
-                                        ForEach(0..<3) { _ in
+                                        ForEach(0..<3, id: \.self) { _ in
                                             RoundedRectangle(cornerRadius: 20)
                                                 .fill(Color.gray.opacity(0.1))
                                                 .frame(width: 140, height: 180)
@@ -255,29 +275,16 @@ struct NewHomeView: View {
                                             shareTrip(nearestTrip)
                                         }
                                     )
+                                    .padding(.horizontal, -20) // Widen the initial layout so when scaled it's wider
+                                    .scaleEffect(0.85, anchor: .top) // Slightly larger scale so it looks better
+                                    .frame(height: 145, alignment: .top)
                                 }
                                 .buttonStyle(.plain)
+                                .padding(.top, 4)
                             }
                         }
                         
-                        // 4. 探索
-                        VStack(alignment: .leading, spacing: 16) {
-                            Text("探索")
-                                .font(.system(size: 24, weight: .black))
-                                .foregroundColor(PuboColors.navy)
-                                .padding(.horizontal, 24)
-                            
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 16) {
-                                    ForEach(posts) { post in
-                                        ExploreCardView(imageUrl: post.image, tag: post.tags.first ?? "")
-                                    }
-                                }
-                                .padding(.horizontal, 24)
-                            }
-                        }
-                        
-                        Spacer().frame(height: 120) // Bottom structure for tab bar
+                        Spacer().frame(height: 220) // Bottom structure for tab bar (increased to prevent library sheet overlap)
                     }
                 }
             }
@@ -303,13 +310,13 @@ struct CircleButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 20, weight: .bold))
+                .font(.system(size: 16, weight: .bold))
                 .foregroundColor(PuboColors.navy)
-                .frame(width: 44, height: 44)
+                .frame(width: 38, height: 38)
                 .background(Color.white)
                 .clipShape(Circle())
                 .overlay(
-                    Circle().stroke(PuboColors.navy, lineWidth: 2)
+                    Circle().stroke(PuboColors.navy, lineWidth: 1.8)
                 )
         }
     }
@@ -326,10 +333,10 @@ struct BoardingPassView: View {
     @AppStorage("bpSeat") private var seat: String = "12A"
     @AppStorage("bpGate") private var gate: String = "B7"
     
-    @State private var isEditing = false
+    @Binding var isPresented: Bool
     
     var body: some View {
-        Button(action: { isEditing = true }) {
+        Button(action: { withAnimation { isPresented = true } }) {
             VStack(spacing: 0) {
             // Header
             HStack {
@@ -420,13 +427,11 @@ struct BoardingPassView: View {
         .retroShadow(color: .black.opacity(0.1))
         } // End of Button
         .buttonStyle(.plain)
-        .sheet(isPresented: $isEditing) {
-            BoardingPassEditSheet()
-        }
     }
 }
 
 struct BoardingPassEditSheet: View {
+    @Binding var isPresented: Bool
     @AppStorage("bpFromCity") private var fromCity: String = "台北"
     @AppStorage("bpFromCode") private var fromCode: String = "TAIPEI"
     @AppStorage("bpToCity") private var toCity: String = "大阪"
@@ -453,7 +458,7 @@ struct BoardingPassEditSheet: View {
                             .foregroundColor(.white)
                             
                         HStack {
-                            Button(action: { dismiss() }) {
+                            Button(action: { dismissView() }) {
                                 Image("x")
                                     .resizable()
                                     .renderingMode(.template)
@@ -463,7 +468,7 @@ struct BoardingPassEditSheet: View {
                             
                             Spacer()
                             
-                            Button(action: { dismiss() }) {
+                            Button(action: { dismissView() }) {
                                 Text("保存")
                                     .font(.system(size: 14, weight: .bold))
                                     .foregroundColor(PuboColors.navy) // Navy text
@@ -560,16 +565,22 @@ struct BoardingPassEditSheet: View {
                 }
             }
         }
+        .ignoresSafeArea(.all, edges: .bottom)
         // 🚀 TRUE OPEN-BOTTOM DRAWER (Matching Map Card)
         .cornerRadius(32, corners: [.topLeft, .topRight])
         .overlay(
             SheetBorder(radius: 32)
-                .inset(by: 1.5)
-                .stroke(PuboColors.red, lineWidth: 3)
+                .inset(by: 1.25)
+                .stroke(PuboColors.red, lineWidth: 2.5)
         )
-        .ignoresSafeArea(.all, edges: .bottom)
         .presentationBackground(.clear)
+        .presentationCornerRadius(32) // Prevent system-level corner clipping
         .presentationDetents([.fraction(0.65)]) // Height lowered
+    }
+    
+    private func dismissView() {
+        isPresented = false
+        dismiss()
     }
     
     private func flightDetailRow(label: String, value: Binding<String>) -> some View {
@@ -602,29 +613,13 @@ struct RecommendationCard: View {
             // Image Area
             let sanitizedUrl = (post.coverImageUrl ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-                .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-            
-            AsyncImage(url: URL(string: sanitizedUrl)) { phase in
-                if let image = phase.image {
-                    image.resizable()
-                        .aspectRatio(contentMode: .fill)
-                } else if phase.error != nil {
-                    // Fallback for load error
-                    Color.gray.opacity(0.15)
-                        .overlay(
-                            VStack(spacing: 4) {
-                                Image(systemName: "exclamationmark.triangle")
-                                    .font(.system(size: 14))
-                                Text("載入失敗")
-                                    .font(.system(size: 8))
-                            }
-                            .foregroundColor(.gray)
-                        )
-                } else {
-                    // Loading state
-                    Color.gray.opacity(0.1)
-                        .overlay(ProgressView().scaleEffect(0.5))
-                }
+            let url = URL(string: sanitizedUrl) ?? URL(string: sanitizedUrl.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")
+            CachedAsyncImage(url: url) { image in
+                image.resizable()
+                    .aspectRatio(contentMode: .fill)
+            } placeholder: {
+                Color.gray.opacity(0.1)
+                    .overlay(ProgressView().scaleEffect(0.5))
             }
             .frame(width: isFullWidth ? nil : 140)
             .frame(maxWidth: isFullWidth ? .infinity : 140)

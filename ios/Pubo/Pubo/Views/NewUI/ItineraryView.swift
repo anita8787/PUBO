@@ -131,6 +131,7 @@ struct TripListView: View {
                         }
                         .onMove { indices, newOffset in
                             tripManager.trips.move(fromOffsets: indices, toOffset: newOffset)
+                            tripManager.saveTripOrder()
                         }
                     }
                     .listStyle(.plain)
@@ -199,11 +200,16 @@ struct TripListView: View {
                     }
                 }
                 
-                // Debug / Error Info
-                if let error = tripManager.errorMessage {
-                    Text(verbatim: "Error: \(error)")
-                        .foregroundColor(.red)
-                        .padding()
+                // Network error toast (non-blocking, only show user-friendly messages)
+                if let error = tripManager.errorMessage, !error.contains("-1011"), !error.contains("NSURLError") {
+                    Text("⚠️ 無法連線，顯示本機快取資料")
+                        .foregroundColor(PuboColors.red)
+                        .font(.system(size: 12, weight: .medium))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(Color.red.opacity(0.08))
+                        .cornerRadius(8)
+                        .padding(.horizontal)
                 }
             }
             .background(Color.white)
@@ -323,6 +329,7 @@ struct TripDetailView: View {
     @State private var navigationPart1URL: URL?
     @State private var navigationPart2URL: URL?
     @State private var isSorting = false
+    @State private var isEditingSpots = false
     @State private var showLongImagePreview = false
     @State private var showKoreaMapOptions = false // Toggle for KR action sheet
 
@@ -330,6 +337,8 @@ struct TripDetailView: View {
     @State private var activeTransportPickerSpotId: String? = nil
 
     // New Action States
+    @State private var draggedSpot: ItinerarySpot? = nil
+    @State private var scrollTarget: ScrollTarget? = nil
     @State private var moveSpotItem: ItinerarySpot? = nil
     @State private var replaceSpotItem: ItinerarySpot? = nil
     @State private var newSpotName = ""
@@ -343,6 +352,14 @@ struct TripDetailView: View {
             return itineraryDays[selectedDayIndex].spots
         }
         return []
+    }
+    
+    /// For map mode: accommodation always comes first so route starts from the hotel
+    var currentDaySpotsForMap: [ItinerarySpot] {
+        let spots = currentDaySpots
+        let accommodations = spots.filter { $0.category == .accommodation }
+        let regular = spots.filter { $0.category != .accommodation }
+        return accommodations + regular
     }
     
     var dates: [String] {
@@ -361,7 +378,7 @@ struct TripDetailView: View {
                 TripMapPlanningView(
                     trip: trip,
                     position: $cameraPosition,
-                    spots: currentDaySpots,
+                    spots: currentDaySpotsForMap,
                     allDays: itineraryDays,
                     selectedDayIndex: selectedDayIndex,
                     onBack: { withAnimation { isMapMode = false } },
@@ -444,7 +461,7 @@ struct TripDetailView: View {
             LongImagePreviewView(trip: trip, allDays: itineraryDays)
         }
         .sheet(isPresented: $showSettingsModal) {
-            TripSettingsView(tripId: trip.id)
+            TripSettingsView(isPresented: $showSettingsModal, tripId: trip.id)
         }
         // 協作共同編輯 Sheet
         .sheet(isPresented: $showCollaborateSheet) {
@@ -468,8 +485,9 @@ struct TripDetailView: View {
         .onDisappear {
             isTabBarHidden = false
         }
-        .sheet(item: $editingSpot) { spot in
+        .fullScreenCover(item: $editingSpot) { spot in
             EditSpotView(
+                onDismiss: { editingSpot = nil },
                 spot: spot,
                 onSave: { updatedSpot in
                     tripManager.updateSpot(tripId: trip.id, dayIndex: selectedDayIndex, spot: updatedSpot)
@@ -478,6 +496,7 @@ struct TripDetailView: View {
                     tripManager.deleteSpot(tripId: trip.id, dayIndex: selectedDayIndex, spotId: spot.id)
                 }
             )
+            .presentationBackground(.clear)
         }
         // Move Spot Sheet
         .sheet(item: $moveSpotItem) { spot in
@@ -494,7 +513,8 @@ struct TripDetailView: View {
                 tripManager.replaceSpot(tripId: trip.id, dayIndex: selectedDayIndex, oldSpotId: spot.id, newSpot: newSpot)
                 replaceSpotItem = nil
             }
-            .presentationDetents([.medium, .large])
+            .presentationDetents([.height(130), .large])
+            .presentationDragIndicator(.visible)
             .presentationBackground(.white)
         }
     }
@@ -668,132 +688,204 @@ struct TripDetailView: View {
         .background(PuboColors.yellow)
     }
 
+    private var dayHeaderView: some View {
+        Group {
+            if dates.indices.contains(selectedDayIndex) {
+                HStack(alignment: .lastTextBaseline) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(verbatim: "Day \(selectedDayIndex + 1)")
+                            .font(.system(size: 10, weight: .black))
+                            .foregroundColor(.gray)
+                            .tracking(1.5)
+                            .textCase(.uppercase)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 4)
+                            .overlay(
+                                Capsule()
+                                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                            )
+                        
+                        HStack(spacing: 8) {
+                            Text(verbatim: dates[selectedDayIndex])
+                                .font(.system(size: 24, weight: .black))
+                            if itineraryDays.indices.contains(selectedDayIndex) {
+                                Text(verbatim: itineraryDays[selectedDayIndex].weekday ?? "")
+                                    .font(.system(size: 24, weight: .black))
+                            }
+                        }
+                        .foregroundColor(PuboColors.navy)
+                    }
+                    Spacer()
+                    
+                    // Right: Sort Button / Done Button
+                    Button(action: { 
+                        if isEditingSpots {
+                            withAnimation(.spring()) { isEditingSpots = false }
+                        } else if isSorting {
+                            withAnimation { isSorting = false }
+                        } else if tripManager.isAlreadySorted(tripId: trip.id, dayIndex: selectedDayIndex) {
+                            showRestoreSortAlert = true
+                        } else {
+                            Task {
+                                await tripManager.smartSort(tripId: trip.id, dayIndex: selectedDayIndex)
+                            }
+                        }
+                    }) {
+                        HStack(spacing: 6) {
+                            if isEditingSpots {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 14, weight: .black))
+                                Text("完成排序")
+                                    .font(.system(size: 12, weight: .black))
+                            } else {
+                                let isAlreadySorted = tripManager.isAlreadySorted(tripId: trip.id, dayIndex: selectedDayIndex)
+                                Image(systemName: isSorting ? "checkmark" : (isAlreadySorted ? "arrow.uturn.backward" : "bolt.fill"))
+                                    .font(.system(size: 14, weight: .black))
+                                Text(sortButtonLabel)
+                                    .font(.system(size: 12, weight: .black))
+                            }
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(isEditingSpots ? PuboColors.navy : (isSorting ? PuboColors.navy : (tripManager.isAlreadySorted(tripId: trip.id, dayIndex: selectedDayIndex) ? Color.gray : PuboColors.red)))
+                        .clipShape(Capsule())
+                        .retroShadow(color: .black, offset: 2.5)
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, 24)
+                .padding(.bottom, 24)
+            }
+        }
+    }
+
     private var itineraryContent: some View {
         VStack(spacing: 0) {
             Spacer().frame(height: 20)
             
-            ScrollView {
-                 VStack(alignment: .leading, spacing: 0) {
-                     // Day Header
-                     if dates.indices.contains(selectedDayIndex) {
-                         HStack(alignment: .lastTextBaseline) {
-                             VStack(alignment: .leading, spacing: 4) {
-                                 Text(verbatim: "Day \(selectedDayIndex + 1)")
-                                     .font(.system(size: 10, weight: .black))
-                                     .foregroundColor(.gray)
-                                     .tracking(1.5)
-                                     .textCase(.uppercase)
-                                     .padding(.horizontal, 12)
-                                     .padding(.vertical, 4)
-                                     .overlay(
-                                         Capsule()
-                                             .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                                     )
-                                 
-                                 HStack(spacing: 8) {
-                                     Text(verbatim: dates[selectedDayIndex])
-                                         .font(.system(size: 24, weight: .black))
-                                     if itineraryDays.indices.contains(selectedDayIndex) {
-                                         Text(verbatim: itineraryDays[selectedDayIndex].weekday ?? "")
-                                             .font(.system(size: 24, weight: .black))
-                                     }
-                                 }
-                                 .foregroundColor(PuboColors.navy)
-                             }
-                             Spacer()
-                             
-                             // Right: Sort Button (Red Pill + Bolt)
-                             Button(action: { 
-                                 if isSorting {
-                                     withAnimation { isSorting = false }
-                                 } else if tripManager.isAlreadySorted(tripId: trip.id, dayIndex: selectedDayIndex) {
-                                     showRestoreSortAlert = true
-                                 } else {
-                                     Task {
-                                         await tripManager.smartSort(tripId: trip.id, dayIndex: selectedDayIndex)
-                                     }
-                                 }
-                             }) {
-                                 HStack(spacing: 6) {
-                                     let isAlreadySorted = tripManager.isAlreadySorted(tripId: trip.id, dayIndex: selectedDayIndex)
-                                     Image(systemName: isSorting ? "checkmark" : (isAlreadySorted ? "arrow.uturn.backward" : "bolt.fill"))
-                                         .font(.system(size: 14, weight: .black))
-                                     Text(sortButtonLabel)
-                                         .font(.system(size: 12, weight: .black))
-                                 }
-                                 .foregroundColor(.white)
-                                 .padding(.horizontal, 16)
-                                 .padding(.vertical, 8)
-                                 .background(isSorting ? PuboColors.navy : (tripManager.isAlreadySorted(tripId: trip.id, dayIndex: selectedDayIndex) ? Color.gray : PuboColors.red))
-                                 .clipShape(Capsule())
-                                .retroShadow(color: .black, offset: 2.5)
-                             }
-                         }
-                         .padding(.horizontal, 24)
-                         .padding(.top, 24)
-                         .padding(.bottom, 24)
-                     }
-
-                      // Timeline Content
-                      if isSorting {
-                          sortingList
-                      } else {
-                          VStack(spacing: 24) { // Increased spacing between spots
-                                let accommodations = currentDaySpots.filter { $0.category == .accommodation }
-                              let regularSpots = currentDaySpots.filter { $0.category != .accommodation }
-                              
-                              // 1. Pinned Accommodation (If exists)
-                              if let hotel = accommodations.first {
-                                  PinnedAccommodationHeader(spot: hotel)
-                                      .padding(.horizontal, 24)
-                                  
-                                  // Show transport from hotel to first spot
-                                  if let firstSpot = regularSpots.first {
-                                      AccommodationToSpotGap(from: hotel, to: firstSpot)
-                                          .padding(.horizontal, 24)
-                                  }
-                              }
-                              
-                              // 2. Regular Spots
-                              ForEach(Array(regularSpots.enumerated()), id: \.element.id) { index, spot in
-                                  TimelineSpotView(
-                                      spotId: spot.id,
-                                      tripId: trip.id,
-                                      dayIndex: selectedDayIndex,
-                                      isLast: index == regularSpots.count - 1,
-                                      index: index,
-                                      onEdit: {
-                                          editingSpot = spot
-                                      },
-                                      onMove: {
-                                          moveSpotItem = spot
-                                      },
-                                      onReplace: {
-                                          replaceSpotItem = spot
-                                      },
-                                      onDelete: {
-                                          tripManager.deleteSpot(tripId: trip.id, dayIndex: selectedDayIndex, spotId: spot.id)
-                                      },
-                                      onTransportChange: { newType in
-                                          tripManager.updateSpotTransport(tripId: trip.id, dayIndex: selectedDayIndex, spotId: spot.id, transportType: newType)
-                                      },
-                                      dayDate: itineraryDays[selectedDayIndex].date,
-                                      activeTransportPickerSpotId: $activeTransportPickerSpotId,
-                                      fallbackImageUrl: trip.coverImageUrl
-                                  )
-                              }
-
-                              
-                               // Add Spot Button
-                              addSpotButton
-                          }
-                          .padding(.bottom, 100)
-                          .id("trip-\(trip.id)-day-\(selectedDayIndex)-\(currentDaySpots.count)-\(currentDaySpots.map { "\($0.travelMode?.rawValue ?? "none")-\($0.travelTime ?? "")-\($0.travelDistance ?? "")-\($0.imageUrl ?? "")" }.joined())") // Force re-render on any relevant change
-                      }
+            if isEditingSpots {
+                dayHeaderView
+                
+                List {
+                    let regularSpots = currentDaySpots.filter { $0.category != .accommodation }
+                    ForEach(Array(regularSpots.enumerated()), id: \.element.id) { index, spot in
+                        SpotCardView(
+                            spot: spot,
+                            index: index,
+                            onEdit: {},
+                            onMove: {},
+                            onReplace: {},
+                            onDelete: {},
+                            dayDate: itineraryDays[selectedDayIndex].date,
+                            fallbackImageUrl: trip.coverImageUrl,
+                            isEditingSpots: true
+                        )
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                        .padding(.vertical, 8)
+                    }
+                            .onMove { indices, newOffset in
+                        tripManager.moveRegularSpot(tripId: trip.id, dayIndex: selectedDayIndex, from: indices, to: newOffset)
+                    }
                 }
-            }
-        }
-    }
+                .listStyle(.plain)
+                .environment(\.editMode, .constant(.active))
+            } else {
+                ScrollViewReader { scrollProxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            dayHeaderView
+
+                           // Timeline Content
+                           if isSorting {
+                               sortingList
+                           } else {
+                               VStack(spacing: 24) { // Increased spacing between spots
+                                   let accommodations = currentDaySpots.filter { $0.category == .accommodation }
+                                   let regularSpots = currentDaySpots.filter { $0.category != .accommodation }
+                                   
+                                   // 1. Pinned Accommodation (If exists)
+                                   if let hotel = accommodations.first {
+                                       VStack(spacing: 0) {
+                                           PinnedAccommodationHeader(spot: hotel)
+                                               .padding(.horizontal, 24)
+                                           
+                                           // Show transport from hotel to first spot
+                                           if let firstSpot = regularSpots.first {
+                                               AccommodationToSpotGap(
+                                                   from: hotel,
+                                                   to: firstSpot,
+                                                   tripId: trip.id,
+                                                   dayIndex: selectedDayIndex
+                                               )
+                                               .padding(.horizontal, 24)
+                                           }
+                                       }
+                                       .padding(.bottom, -24)
+                                   }
+                                   
+                                   // 2. Regular Spots
+                                       ForEach(Array(regularSpots.enumerated()), id: \.element.id) { index, spot in
+                                           TimelineSpotView(
+                                               spotId: spot.id,
+                                               tripId: trip.id,
+                                               dayIndex: selectedDayIndex,
+                                               isLast: index == regularSpots.count - 1,
+                                               index: index,
+                                               onEdit: {
+                                                   editingSpot = spot
+                                               },
+                                               onMove: {
+                                                   moveSpotItem = spot
+                                               },
+                                               onReplace: {
+                                                   replaceSpotItem = spot
+                                               },
+                                               onDelete: {
+                                                   tripManager.deleteSpot(tripId: trip.id, dayIndex: selectedDayIndex, spotId: spot.id)
+                                               },
+                                               onTransportChange: { newType in
+                                                   tripManager.updateSpotTransport(tripId: trip.id, dayIndex: selectedDayIndex, spotId: spot.id, transportType: newType)
+                                               },
+                                               dayDate: itineraryDays[selectedDayIndex].date,
+                                               activeTransportPickerSpotId: $activeTransportPickerSpotId,
+                                               fallbackImageUrl: trip.coverImageUrl,
+                                               isEditingSpots: false
+                                           )
+                                           .id(spot.id)
+                                           .contentShape(Rectangle())
+                                           .simultaneousGesture(
+                                               LongPressGesture(minimumDuration: 0.5)
+                                                   .onEnded { _ in
+                                                       withAnimation(.spring()) {
+                                                           isEditingSpots = true
+                                                       }
+                                                       UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+                                                   }
+                                           )
+                                       }
+     
+                                   
+                                    // Add Spot Button
+                                   addSpotButton
+                               }
+                               .padding(.bottom, 100)
+                               .id("trip-\(trip.id)-day-\(selectedDayIndex)-\(currentDaySpots.count)-\(currentDaySpots.map { "\($0.travelMode?.rawValue ?? "none")-\($0.travelTime ?? "")-\($0.travelDistance ?? "")-\($0.imageUrl ?? "")" }.joined())") // Force re-render on any relevant change
+                           }
+                     }
+                }
+                .onChange(of: scrollTarget) { _, target in
+                    if let target = target {
+                        withAnimation(.easeOut(duration: 0.25)) {
+                            scrollProxy.scrollTo(target.id, anchor: .center)
+                        }
+                    }
+                }
+                } // ScrollViewReader end
+            } // else (isEditingSpots) end
+        } // VStack end
+    } // itineraryContent end
 
     private var sortingList: some View {
         List {
@@ -870,42 +962,44 @@ struct TripDetailView: View {
 
             
             // === FLOATING MAP/LIST TOGGLE ===
-            VStack {
-                Spacer()
-                HStack {
+            if !isEditingSpots {
+                VStack {
                     Spacer()
-                    VStack(spacing: 4) {
-                        // Map Button
-                        Button(action: { withAnimation { isMapMode = true } }) {
-                            Image(systemName: "map")
-                                .font(.system(size: 18, weight: .bold))
-                                .foregroundColor(isMapMode ? PuboColors.navy : Color(hex: "FDF1CA"))
-                                .frame(width: 36, height: 38)
-                                .background(isMapMode ? Color.white : Color.clear)
-                                .clipShape(Circle())
-                                .shadow(color: isMapMode ? .black.opacity(0.1) : .clear, radius: 4)
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 4) {
+                            // Map Button
+                            Button(action: { withAnimation { isMapMode = true } }) {
+                                Image(systemName: "map")
+                                    .font(.system(size: 18, weight: .bold))
+                                    .foregroundColor(isMapMode ? PuboColors.navy : Color(hex: "FDF1CA"))
+                                    .frame(width: 36, height: 38)
+                                    .background(isMapMode ? Color.white : Color.clear)
+                                    .clipShape(Circle())
+                                    .shadow(color: isMapMode ? .black.opacity(0.1) : .clear, radius: 4)
+                            }
+                            // List Button
+                            Button(action: { withAnimation { isMapMode = false } }) {
+                                Image(systemName: "list.number")
+                                    .font(.system(size: 18, weight: .bold))
+                                    .foregroundColor(isMapMode ? PuboColors.navy : .white)
+                                    .frame(width: 36, height: 38)
+                                    .background(isMapMode ? Color.clear : PuboColors.navy)
+                                    .clipShape(Circle())
+                                    .shadow(color: isMapMode ? .clear : .black.opacity(0.1), radius: 4)
+                            }
                         }
-                        // List Button
-                        Button(action: { withAnimation { isMapMode = false } }) {
-                            Image(systemName: "list.number")
-                                .font(.system(size: 18, weight: .bold))
-                                .foregroundColor(isMapMode ? PuboColors.navy : .white)
-                                .frame(width: 36, height: 38)
-                                .background(isMapMode ? Color.clear : PuboColors.navy)
-                                .clipShape(Circle())
-                                .shadow(color: isMapMode ? .clear : .black.opacity(0.1), radius: 4)
-                        }
+                        .padding(4)
+                        .frame(width: 44, height: 92)
+                        .background(Color(hex: "9BB8D9"))
+                        .clipShape(Capsule())
+                        .overlay(Capsule().stroke(Color.white.opacity(0.4), lineWidth: 1))
+                        .shadow(color: .black.opacity(0.2), radius: 20, x: 0, y: 10)
                     }
-                    .padding(4)
-                    .frame(width: 44, height: 92)
-                    .background(Color(hex: "9BB8D9"))
-                    .clipShape(Capsule())
-                    .overlay(Capsule().stroke(Color.white.opacity(0.4), lineWidth: 1))
-                    .shadow(color: .black.opacity(0.2), radius: 20, x: 0, y: 10)
-                }
-                .padding(.trailing, 24)
-                .padding(.bottom, 80)
-            } // End VStack (Floating)
+                    .padding(.trailing, 24)
+                    .padding(.bottom, 80)
+                } // End VStack (Floating)
+            }
         } // End ZStack (planningView)
     }
     // MARK: - Navigation Logic
@@ -919,15 +1013,10 @@ struct TripDetailView: View {
     }
     
     func handleNotesExport() {
-        // 取得整趟旅程的所有景點，或者目前這天的景點。
-        // 這裡我們取 currentDaySpots 作為匯出的內容
-        let spots = currentDaySpots.filter { $0.category != .accommodation }
-        guard !spots.isEmpty else { return }
-        
         // 複製到剪貼簿 (支援富文本)
         PuboTextPackager.copyNotesToPasteboard(
-            tripTitle: trip.title, 
-            spots: spots
+            trip: trip,
+            allDays: itineraryDays
         )
         
         self.showNotesJumpAlert = true
@@ -982,6 +1071,7 @@ struct TimelineSpotView: View {
     @EnvironmentObject var tripManager: TripManager
     @Binding var activeTransportPickerSpotId: String?
     var fallbackImageUrl: String? = nil
+    var isEditingSpots: Bool = false
     
     @State private var offset: CGFloat = 0
     @State private var showDeleteConfirmation = false
@@ -1029,7 +1119,8 @@ struct TimelineSpotView: View {
                     onReplace: onReplace,
                     onDelete: onDelete,
                     dayDate: dayDate,
-                    fallbackImageUrl: fallbackImageUrl
+                    fallbackImageUrl: fallbackImageUrl,
+                    isEditingSpots: isEditingSpots
                 )
                 .padding(.horizontal, 24)
                 // .background(Color.white) // Removed to prevent white corners
@@ -1037,12 +1128,14 @@ struct TimelineSpotView: View {
                 .gesture(
                     DragGesture()
                         .onChanged { gesture in
+                            if isEditingSpots { return }
                             // Only allow sliding left
                             if gesture.translation.width < 0 {
                                 offset = gesture.translation.width
                             }
                         }
                         .onEnded { _ in
+                            if isEditingSpots { return }
                             if offset < -50 {
                                 withAnimation(.spring()) {
                                     offset = -60 // Snap open
@@ -1074,8 +1167,8 @@ struct TimelineSpotView: View {
             
             Spacer().frame(height: 12) // Gap between card and memo
             // 2. GAP (Line + Memo/Transport)
-            // Only show if there's content OR it's not the last one (to show line connecting to next)
-            if !isLast {
+            let hasMemo = spot.notes?.isEmpty == false
+            if !isLast || hasMemo {
                 HStack(alignment: .top, spacing: 0) {
                     
                     // Left Spacer to align line nicely - Image is 115 wide, centered in 335 block.
@@ -1087,10 +1180,14 @@ struct TimelineSpotView: View {
                     
                     // Dotted Line
                     VStack {
-                        Line()
-                            .stroke(style: StrokeStyle(lineWidth: 2, dash: [4]))
-                            .foregroundColor(Color.gray.opacity(0.3))
-                            .frame(width: 2)
+                        if !isLast {
+                            Line()
+                                .stroke(style: StrokeStyle(lineWidth: 2, dash: [4]))
+                                .foregroundColor(Color.gray.opacity(0.3))
+                                .frame(width: 2)
+                        } else {
+                            Color.clear.frame(width: 2)
+                        }
                     }
                     
                     // Gap content (Memo + Transport) aligned to line
@@ -1099,8 +1196,9 @@ struct TimelineSpotView: View {
                         // Memo
                         if let notes = spot.notes, !notes.isEmpty {
                             VStack(alignment: .leading, spacing: 6) {
-                                // Time Range Calculation (Moved to top of Memo)
-                                let endTime = calculateEndTime(start: spot.time, duration: spot.duration)
+                                // Time Range: use subLabel (user-editable stay duration) if available, else duration
+                                let stayDuration = spot.subLabel ?? spot.duration
+                                let endTime = calculateEndTime(start: spot.time, duration: stayDuration)
                                 Text(verbatim: "\(spot.time) - \(endTime)")
                                     .font(.system(size: 11, weight: .black))
                                     .foregroundColor(Color(hex: "023B7E")) // Deep Blue text for time
@@ -1125,56 +1223,62 @@ struct TimelineSpotView: View {
                             .cornerRadius(4)
                             .padding(.leading, 12)
                             .padding(.top, 4)
+                            .contentShape(Rectangle()) // Ensure entire area is tappable
+                            .onTapGesture {
+                                onEdit()
+                            }
                         }
                         
                         // Transport (tappable to change mode)
-                        VStack(spacing: 8) {
-                            Button(action: {
-                                print("Transport button tapped for spot: \(spot.name)")
-                                withAnimation(.spring(response: 0.3)) {
-                                    if activeTransportPickerSpotId == spot.id {
-                                        activeTransportPickerSpotId = nil
-                                    } else {
-                                        activeTransportPickerSpotId = spot.id
-                                    }
-                                }
-                            }) {
-                                HStack(spacing: 8) {
-                                    let info = spot.travelToNext
-                                    let transportType = info?.type ?? .train
-                                    let transportTime = info?.time ?? "--"
-                                    let transportDistance = info?.distance ?? "--"
-                                    let isPickerOpenNow = (activeTransportPickerSpotId == spot.id)
-                                    let isSelected = spot.travelMode != nil || isPickerOpenNow
-                                    
-                                    Image(systemName: transportIcon(for: transportType))
-                                        .font(.system(size: 14))
-                                        .foregroundColor(isSelected ? PuboColors.navy : .gray.opacity(0.35))
-                                        .frame(width: 32, height: 32)
-                                        .background(Color.white)
-                                        .clipShape(Circle())
-                                        .overlay(Circle().stroke(isSelected ? PuboColors.navy : Color.clear, lineWidth: isSelected ? 2.0 : 0))
-                                        .shadow(color: .black.opacity(isSelected ? 0.0 : 0.08), radius: 3)
-                                    
-                                    Text("\(transportTime) • \(transportDistance)")
-                                        .font(.system(size: 12, weight: .black))
-                                        .foregroundColor(info != nil ? .black.opacity(0.7) : .gray.opacity(0.4))
-                                }
-                                .padding(.vertical, 12)
-                                .padding(.horizontal, 16)
-                                .contentShape(Rectangle()) // Essential for hit area
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            
-                            if isPickerOpen {
-                                TransportPicker(currentType: spot.travelMode ?? .train) { newType in
-                                    onTransportChange?(newType)
+                        if !isLast {
+                            VStack(spacing: 8) {
+                                Button(action: {
+                                    print("Transport button tapped for spot: \(spot.name)")
                                     withAnimation(.spring(response: 0.3)) {
-                                        activeTransportPickerSpotId = nil
+                                        if activeTransportPickerSpotId == spot.id {
+                                            activeTransportPickerSpotId = nil
+                                        } else {
+                                            activeTransportPickerSpotId = spot.id
+                                        }
                                     }
+                                }) {
+                                    HStack(spacing: 8) {
+                                        let info = spot.travelToNext
+                                        let transportType = info?.type ?? .train
+                                        let transportTime = info?.time ?? "--"
+                                        let transportDistance = info?.distance ?? "--"
+                                        let isPickerOpenNow = (activeTransportPickerSpotId == spot.id)
+                                        let isSelected = spot.travelMode != nil || isPickerOpenNow
+                                        
+                                        Image(systemName: transportIcon(for: transportType))
+                                            .font(.system(size: 14))
+                                            .foregroundColor(isSelected ? PuboColors.navy : .gray.opacity(0.35))
+                                            .frame(width: 32, height: 32)
+                                            .background(Color.white)
+                                            .clipShape(Circle())
+                                            .overlay(Circle().stroke(isSelected ? PuboColors.navy : Color.clear, lineWidth: isSelected ? 2.0 : 0))
+                                            .shadow(color: .black.opacity(isSelected ? 0.0 : 0.08), radius: 3)
+                                        
+                                        Text("\(transportTime) • \(transportDistance)")
+                                            .font(.system(size: 12, weight: .black))
+                                            .foregroundColor(info != nil ? .black.opacity(0.7) : .gray.opacity(0.4))
+                                    }
+                                    .padding(.vertical, 12)
+                                    .padding(.horizontal, 16)
+                                    .contentShape(Rectangle()) // Essential for hit area
                                 }
-                                .padding(.leading, 32)
-                                .transition(.scale(scale: 0.8).combined(with: .opacity))
+                                .buttonStyle(PlainButtonStyle())
+                                
+                                if isPickerOpen {
+                                    TransportPicker(currentType: spot.travelMode ?? .train) { newType in
+                                        onTransportChange?(newType)
+                                        withAnimation(.spring(response: 0.3)) {
+                                            activeTransportPickerSpotId = nil
+                                        }
+                                    }
+                                    .padding(.leading, 32)
+                                    .transition(.scale(scale: 0.8).combined(with: .opacity))
+                                }
                             }
                         }
                     }
@@ -1200,17 +1304,42 @@ struct TimelineSpotView: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
         
-        var minutes = 60
-        if duration.contains("小時") {
-             minutes = (Int(duration.replacingOccurrences(of: "小時", with: "")) ?? 1) * 60
-        } else if duration.contains("分鐘") {
-             minutes = Int(duration.replacingOccurrences(of: "分鐘", with: "")) ?? 60
+        var totalMinutes = 60 // default 1 hour
+        
+        // Handle formats: "1時10分鐘", "1 時 10 分鐘", "1小時10分鐘", "90分鐘", "1小時", "1時"
+        let cleaned = duration
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "小", with: "") // 小 -> removed (小時 becomes 時)
+        
+        // Try to extract hours and minutes from combined format
+        var hours = 0
+        var minutes = 0
+        
+        // Extract hours (支援 "1時" or "1小時")
+        if let hourRange = cleaned.range(of: #"(\d+)時"#, options: .regularExpression) {
+            let match = String(cleaned[hourRange])
+            if let h = Int(match.replacingOccurrences(of: "時", with: "")) {
+                hours = h
+            }
+        }
+        
+        // Extract minutes (支援 "10分鐘" or "10分")
+        if let minRange = cleaned.range(of: #"(\d+)分"#, options: .regularExpression) {
+            let match = String(cleaned[minRange])
+            if let m = Int(match.replacingOccurrences(of: "分鐘", with: "").replacingOccurrences(of: "分", with: "")) {
+                minutes = m
+            }
+        }
+        
+        if hours > 0 || minutes > 0 {
+            totalMinutes = hours * 60 + minutes
         } else if let val = Int(duration) {
-             minutes = val
+            // Pure integer fallback
+            totalMinutes = val
         }
         
         if let date = formatter.date(from: start) {
-            let endDate = Calendar.current.date(byAdding: .minute, value: minutes, to: date) ?? date
+            let endDate = Calendar.current.date(byAdding: .minute, value: totalMinutes, to: date) ?? date
             return formatter.string(from: endDate)
         }
         return start
@@ -1228,13 +1357,12 @@ struct SpotCardView: View {
     var dayDate: Date? // Passed from parent
     var fallbackImageUrl: String? = nil // From Trip.coverImageUrl
     var isConcise: Bool = false
+    var isEditingSpots: Bool = false
     
     // Computed Business Status
     var businessStatus: BusinessStatusResult? {
         spot.businessStatusText(for: dayDate)
     }
-    
-    @State private var otmImageUrl: String? = nil
     
     var body: some View {
         HStack(spacing: 0) {
@@ -1243,58 +1371,17 @@ struct SpotCardView: View {
             HStack(alignment: .center, spacing: -20) { // Overlap
                 // Left: Image Area with Index Badge
                 ZStack(alignment: .topLeading) {
-                    // Image Logic: 優先顯示社群封面圖 > OTM > Placeholder
+                    // Image Logic: 只使用社群封面圖 (spot.imageUrl)，沒有則顯示預設佔位圖
                     if let imageUrl = spot.imageUrl, !imageUrl.isEmpty {
-                        AsyncImage(url: URL(string: imageUrl)) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image.resizable().aspectRatio(contentMode: .fill)
-                            case .failure:
-                                // 圖片失敗時，嘗試顯示行程封面圖
-                                if let fallback = fallbackImageUrl, let url = URL(string: fallback) {
-                                    AsyncImage(url: url) { image in
-                                        image.resizable().aspectRatio(contentMode: .fill)
-                                    } placeholder: {
-                                        defaultImagePlaceholder
-                                    }
-                                } else {
-                                    defaultImagePlaceholder
-                                }
-                            case .empty:
-                                // 正在載入中，顯示淡灰色佔位，不顯示轉圈圈
-                                Color.gray.opacity(0.08)
-                                    .overlay(
-                                        Image(systemName: "photo")
-                                            .font(.system(size: 24))
-                                            .foregroundColor(.gray.opacity(0.3))
-                                    )
-                            @unknown default:
-                                defaultImagePlaceholder
-                            }
+                        CachedAsyncImage(url: URL(string: imageUrl)) { image in
+                            image.resizable().aspectRatio(contentMode: .fill)
+                        } placeholder: {
+                            defaultImagePlaceholder
                         }
                         .frame(width: 115, height: 115)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
-                    } else if let otmString = otmImageUrl, !otmString.isEmpty, let url = URL(string: otmString) {
-                         // 2. OTM Image
-                         AsyncImage(url: url) { image in
-                             image.resizable().aspectRatio(contentMode: .fill)
-                         } placeholder: {
-                            ProgressView()
-                         }
-                         .frame(width: 115, height: 115)
-                         .clipShape(RoundedRectangle(cornerRadius: 12))
-                         .transition(.opacity)
-                    } else if let fallback = fallbackImageUrl, !fallback.isEmpty, let url = URL(string: fallback) {
-                         // 3. Fallback (Trip Image)
-                         AsyncImage(url: url) { image in
-                             image.resizable().aspectRatio(contentMode: .fill)
-                         } placeholder: {
-                            defaultImagePlaceholder
-                         }
-                         .frame(width: 115, height: 115)
-                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     } else {
-                        // 4. Placeholder
+                        // 沒有社群圖片，直接顯示預設佔位圖
                         defaultImagePlaceholder
                             .frame(width: 115, height: 115)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
@@ -1311,21 +1398,14 @@ struct SpotCardView: View {
                 }
                 .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
                 .zIndex(1)
+                .onTapGesture(count: 2) {
+                    openGoogleMaps()
+                }
                 
                 // Right: Info Box
                 ZStack {
                     // 1. Centered Info Section
                     VStack(alignment: .leading, spacing: 5) {
-                        // Status & Opening Time
-                        Text(spot.simplifiedStatusText)
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(PuboColors.red)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(PuboColors.red.opacity(0.1))
-                            .clipShape(Capsule())
-                            .overlay(Capsule().stroke(PuboColors.red, lineWidth: 1))
-                        
                         // Name
                         Text(verbatim: spot.name)
                             .font(.system(size: 16, weight: .bold))
@@ -1348,17 +1428,17 @@ struct SpotCardView: View {
                     .padding(.trailing, 45) // Room for buttons
                     
                     // 2. Corner Buttons Overlay
-                    VStack {
+                    if !isEditingSpots {
+                        VStack {
                         // Top Right: Pencil
                         HStack {
                             Spacer()
                             Button(action: onEdit) {
                                 Image(systemName: "pencil")
-                                    .font(.system(size: 12, weight: .bold))
+                                    .font(.system(size: 16, weight: .bold))
                                     .foregroundColor(PuboColors.navy)
                                     .frame(width: 28, height: 28)
-                                    .background(Color.white)
-                                    .overlay(Circle().stroke(PuboColors.navy, lineWidth: 1.5))
+                                    .contentShape(Rectangle())
                             }
                         }
                         
@@ -1389,37 +1469,19 @@ struct SpotCardView: View {
                         }
                     }
                     .padding(10) // Equal spacing from all corners
+                    } // End if !isEditingSpots
                 }
                 .frame(height: isConcise ? 210 : 115) // Reduced height for concise modeFixed height to match image
                 .background(Color.white)
                 .cornerRadius(12)
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.black.opacity(0.8), lineWidth: 1.5))
                 .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
+                .contentShape(.dragPreview, RoundedRectangle(cornerRadius: 12))
             }
             
             Spacer() // Center push
         }
-        .task {
-            // Fetch OTM photo if backend photo is missing
-            print("SpotCardView: Task started for \(spot.name)")
-            print("SpotCardView: ImageKey='\(spot.imageUrl ?? "nil")'")
-            
-            if (spot.imageUrl == nil || spot.imageUrl?.isEmpty == true),
-               let lat = spot.latitude, let lon = spot.longitude,
-               lat != 0.0 || lon != 0.0 {
-                print("SpotCardView: Coordinates valid: \(lat), \(lon)")
-                if otmImageUrl == nil {
-                    print("SpotCardView: Fetching OTM...")
-                    if let info = try? await OTMService.shared.fetchPlaceInfo(for: lat, longitude: lon) {
-                        otmImageUrl = info.imageUrl
-                        print("SpotCardView: OTM Result for \(spot.name): Img=\(info.imageUrl ?? "nil")")
-                    }
-                }
-            } else {
-                print("SpotCardView: Skipping OTM. HasImage=\(spot.imageUrl != nil), LatLon=\(spot.latitude != nil)")
-            }
-        }
-    }
+}
     
     var defaultImagePlaceholder: some View {
         ZStack {
@@ -1440,6 +1502,25 @@ struct SpotCardView: View {
         case .transport: return "tram.fill"
         }
     }
+
+    
+    private func openGoogleMaps() {
+        let encodedName = spot.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        if let googlePlaceId = spot.googlePlaceId, !googlePlaceId.isEmpty {
+            let urlString = "https://www.google.com/maps/search/?api=1&query=\(encodedName)&query_place_id=\(googlePlaceId)"
+            if let url = URL(string: urlString) {
+                UIApplication.shared.open(url)
+            }
+        } else if let lat = spot.latitude, let lon = spot.longitude {
+            let urlString = "https://www.google.com/maps/search/?api=1&query=\(lat),\(lon)"
+            if let url = URL(string: urlString) {
+                UIApplication.shared.open(url)
+            }
+        } else {
+            let webUrl = URL(string: "https://www.google.com/maps/search/?api=1&query=\(encodedName)")!
+            UIApplication.shared.open(webUrl)
+        }
+    }
 }
 
 // Reconstructed TransportPicker
@@ -1447,7 +1528,7 @@ struct TransportPicker: View {
     let currentType: TransportType
     let onSelect: (TransportType) -> Void
     
-    let types: [TransportType] = [.train, .bus, .car, .walk]
+    let types: [TransportType] = [.train, .car, .walk]
     
     var body: some View {
         HStack(spacing: 12) {
@@ -1528,6 +1609,7 @@ struct ReplaceSpotSheet: View {
     @State private var searchText = ""
     @State private var showCollection = false
     @FocusState private var isSearchFocused: Bool
+    @State private var selectedDetent: PresentationDetent = .height(130)
     
     var body: some View {
         VStack(spacing: 0) {
@@ -1546,7 +1628,7 @@ struct ReplaceSpotSheet: View {
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.top, 20)
+            .padding(.top, 8)
             .padding(.bottom, 12)
             
             // Search Bar with Collection Icon
@@ -1554,7 +1636,14 @@ struct ReplaceSpotSheet: View {
                 // Collection icon button
                 Button(action: {
                     withAnimation { showCollection.toggle() }
-                    if showCollection { isSearchFocused = false }
+                    if showCollection {
+                        isSearchFocused = false
+                    } else {
+                        isSearchFocused = true
+                    }
+                    withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                        selectedDetent = (showCollection || !searchText.isEmpty) ? .large : .height(130)
+                    }
                 }) {
                     Image("collection")
                         .font(.system(size: 16))
@@ -1575,12 +1664,18 @@ struct ReplaceSpotSheet: View {
                         .onChange(of: searchText) {
                             if !searchText.isEmpty { showCollection = false }
                             searchService.updateQuery(searchText)
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                                selectedDetent = searchText.isEmpty ? .height(130) : .large
+                            }
                         }
                     
                     if !searchText.isEmpty {
                         Button(action: {
                             searchText = ""
                             searchService.updateQuery("")
+                            withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                                selectedDetent = .height(130)
+                            }
                         }) {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundColor(.gray)
@@ -1626,10 +1721,12 @@ struct ReplaceSpotSheet: View {
         }
         .onAppear {
             // Auto-focus search bar
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                 isSearchFocused = true
             }
         }
+        .presentationDetents([.height(130), .large], selection: $selectedDetent)
+        .presentationDragIndicator(.visible)
     }
     
     // MARK: - Search Results
@@ -2107,21 +2204,40 @@ struct PinnedAccommodationHeader: View {
 struct AccommodationToSpotGap: View {
     let from: ItinerarySpot
     let to: ItinerarySpot
+    let tripId: String
+    let dayIndex: Int
     @EnvironmentObject var tripManager: TripManager
+    @State private var showTransportPicker = false
+    
+    var currentMode: TransportType {
+        from.travelMode ?? .train
+    }
     
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
-            Spacer().frame(width: 22 + 24) // Align with the center of the bed circle - account for overall horizontal padding 24
+            Spacer().frame(width: 22 + 24) // Align with the center of the bed circle
             
             VStack {
                 Line()
                     .stroke(style: StrokeStyle(lineWidth: 2, dash: [4]))
                     .foregroundColor(Color.gray.opacity(0.3))
-                    .frame(width: 2, height: 40)
+                    .frame(width: 2, height: showTransportPicker ? 70 : 40)
             }
             
             VStack(alignment: .leading, spacing: 4) {
+                // Time & Distance row
                 HStack(spacing: 6) {
+                    // Transport icon button
+                    Button(action: {
+                        withAnimation(.spring(response: 0.3)) {
+                            showTransportPicker.toggle()
+                        }
+                    }) {
+                        Image(systemName: transportIconName(for: currentMode))
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(PuboColors.navy)
+                    }
+                    
                     Image(systemName: "clock")
                         .font(.system(size: 10))
                     Text(from.travelTime ?? "計算中...")
@@ -2135,10 +2251,37 @@ struct AccommodationToSpotGap: View {
                 }
                 .foregroundColor(.gray)
                 .padding(.leading, 12)
-                .offset(y: 10)
+                .offset(y: 6)
+                
+                // Transport picker (expanded on tap)
+                if showTransportPicker {
+                    TransportPicker(currentType: currentMode) { selected in
+                        withAnimation(.spring(response: 0.3)) {
+                            showTransportPicker = false
+                        }
+                        tripManager.updateSpotTransport(
+                            tripId: tripId,
+                            dayIndex: dayIndex,
+                            spotId: from.id,
+                            transportType: selected
+                        )
+                    }
+                    .padding(.leading, 12)
+                    .offset(y: 10)
+                    .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .leading)))
+                }
             }
             
             Spacer()
+        }
+    }
+    
+    private func transportIconName(for mode: TransportType) -> String {
+        switch mode {
+        case .train: return "tram.fill"
+        case .walk:  return "figure.walk"
+        case .car:   return "car.fill"
+        case .bus:   return "bus.fill"
         }
     }
 }

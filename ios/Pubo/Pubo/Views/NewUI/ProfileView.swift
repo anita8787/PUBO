@@ -174,7 +174,7 @@ struct ProfileView: View {
             }
             .alert("登出", isPresented: $showLogoutAlert) {
                 Button("取消", role: .cancel) { }
-                Button("確認登出", role: .destructive) { /* TODO: auth logout */ }
+                Button("確認登出", role: .destructive) { AuthManager.shared.signOut() }
             } message: {
                 Text("確定要登出您的帳號嗎？")
             }

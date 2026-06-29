@@ -27,15 +27,18 @@ struct SwipeToDeleteWrapper<Content: View>: View {
                         .foregroundColor(PuboColors.red)
                         .padding(.trailing, 24)
                 }
+                .opacity(offset < -5 ? 1 : 0)
             }
             
             // Main content
             content()
-                .background(Color(hex: "FDFAEE"))
                 .offset(x: offset)
                 .gesture(
                     DragGesture(minimumDistance: 20)
                         .onChanged { value in
+                            // Prevent horizontal swipe trigger if the user is dragging vertically (e.g., reordering)
+                            if !isSwiped && abs(value.translation.height) > abs(value.translation.width) { return }
+                            
                             let translation = value.translation.width
                             if translation < 0 {
                                 // Swiping left
@@ -47,16 +50,10 @@ struct SwipeToDeleteWrapper<Content: View>: View {
                             }
                         }
                         .onEnded { value in
-                            let translation = value.translation.width
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                if translation < -fullSwipeThreshold {
-                                    // Full swipe — delete immediately
-                                    offset = -1000
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                                        onDelete()
-                                    }
-                                } else if translation < -40 {
-                                    // Partial swipe — reveal delete button
+                            let predictedOffset = offset + value.predictedEndTranslation.width
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                if predictedOffset < -40 {
+                                    // Swipe enough to reveal delete button
                                     offset = -deleteButtonWidth
                                     isSwiped = true
                                 } else {

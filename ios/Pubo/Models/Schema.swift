@@ -11,6 +11,7 @@ final class SDPlace {
     var category: String?
     var confidenceScore: Double
     var createdAt: Date
+    var isSaved: Bool = true
     
     // Relationships
     @Relationship(deleteRule: .nullify, inverse: \SDContent.places)
@@ -24,7 +25,8 @@ final class SDPlace {
         longitude: Double,
         category: String? = nil,
         confidenceScore: Double = 0.0,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        isSaved: Bool = true
     ) {
         self.id = id
         self.name = name
@@ -34,6 +36,7 @@ final class SDPlace {
         self.category = category
         self.confidenceScore = confidenceScore
         self.createdAt = createdAt
+        self.isSaved = isSaved
     }
 }
 

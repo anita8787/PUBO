@@ -21,8 +21,8 @@ class PlacesService:
         headers = {
             "Content-Type": "application/json",
             "X-Goog-Api-Key": self.api_key,
-            # FieldMask specifices which fields to return to save cost/latency
-            "X-Goog-FieldMask": "places.name,places.id,places.formattedAddress,places.location,places.types,places.rating,places.userRatingCount,places.displayName,places.primaryType,places.currentOpeningHours,places.regularOpeningHours"
+            # Update to Text Search (Advanced) to fetch all required fields in one call to save costs.
+            "X-Goog-FieldMask": "places.id,places.name,places.displayName,places.formattedAddress,places.location,places.primaryType"
         }
         payload = {
             "textQuery": query,
@@ -43,33 +43,4 @@ class PlacesService:
             print(f"Error searching place '{query}': {e}")
             return None
 
-    def get_place_details(self, place_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get details for a specific place.
-        """
-        if not self.api_key:
-            return None
-            
-        # For New Places API, place_id is part of the URL path: places/{placeId}
-        # But wait, looking at docs, it's usually just GET /v1/places/{placeId}
-        # Ensure place_id doesn't already have 'places/' prefix if passed from search result
-        
-        clean_place_id = place_id
-        if "places/" in place_id:
-             clean_place_id = place_id.split("places/")[1]
 
-        url = f"{self.base_url}/places/{clean_place_id}"
-        headers = {
-            "Content-Type": "application/json",
-            "X-Goog-Api-Key": self.api_key,
-            "X-Goog-FieldMask": "id,displayName,formattedAddress,location,currentOpeningHours,regularOpeningHours,types,primaryType,rating,userRatingCount,priceLevel,websiteUri"
-        }
-
-        try:
-            params = {"languageCode": "zh-TW"}
-            response = requests.get(url, headers=headers, params=params)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            print(f"Error getting details for place '{place_id}': {e}")
-            return None

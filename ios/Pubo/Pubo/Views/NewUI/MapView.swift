@@ -14,8 +14,9 @@ struct MapView: View {
     ))
     
     
+    @State private var isManuallySelectedRegion = false
     @State private var selectedPlace: MapPlace? = nil
-    @State private var selectedCategory: String = "美食"
+    @State private var selectedCategory: String = "全部"
     @State private var showCityPicker = false
     @State private var showSearch = false
     @State private var searchText = ""
@@ -23,33 +24,97 @@ struct MapView: View {
     @State private var currentCity = "台北市"
     @State private var searchedPlaces: [MapPlace] = []
     @State private var mapSelection: MapFeature? = nil
+    @State private var visibleRegion: MKCoordinateRegion?
     @EnvironmentObject var tripManager: TripManager
     @EnvironmentObject var locationManager: LocationManager
     @Query var savedPlaces: [SDPlace]
     var onBack: () -> Void
     
-    let categories = ["美食", "景點", "文青朝聖"]
-    let categoryEmoji: [String: String] = ["美食": "🍜", "景點": "🌿", "文青朝聖": "✝️"]
+    let categories = ["全部", "美食", "景點", "購物", "住宿"]
+    let categoryEmoji: [String: String] = ["全部": "📍", "美食": "🍴", "景點": "🌿", "購物": "🛍️", "住宿": "🏨"]
     
     // Removed mock places
     
     var filteredPlaces: [SDPlace] {
-        return savedPlaces
+        savedPlaces.filter { sdPlace in
+            guard sdPlace.isSaved else { return false }
+            if selectedCategory == "全部" { return true }
+            return normalizedCategory(sdPlace.category ?? "") == selectedCategory
+        }
+    }
+    
+    var filteredSearchedPlaces: [MapPlace] {
+        if selectedCategory == "全部" { return searchedPlaces }
+        return searchedPlaces.filter { place in
+            normalizedCategory(place.category) == selectedCategory
+        }
+    }
+    
+    private func normalizedCategory(_ category: String) -> String {
+        let cat = category.lowercased()
+        if cat.contains("美食") || cat.contains("food") || cat.contains("餐廳") || cat.contains("咖啡") || cat.contains("拉麵") || cat.contains("小吃") || cat.contains("餐餐") {
+            return "美食"
+        } else if cat.contains("購物") || cat.contains("shopping") || cat.contains("百貨") || cat.contains("商店") {
+            return "購物"
+        } else if cat.contains("住宿") || cat.contains("stay") || cat.contains("hotel") || cat.contains("宿") {
+            return "住宿"
+        } else {
+            return "景點"
+        }
+    }
+    
+    private func searchMapForCategory(_ category: String) {
+        guard let region = visibleRegion else { return }
+        Task {
+            let request = MKLocalSearch.Request()
+            let query: String
+            switch category {
+            case "美食": query = "餐廳"
+            case "購物": query = "購物"
+            case "住宿": query = "飯店"
+            case "景點": query = "景點"
+            default: query = category
+            }
+            request.naturalLanguageQuery = query
+            request.region = region
+            let search = MKLocalSearch(request: request)
+            do {
+                let response = try await search.start()
+                await MainActor.run {
+                    var newPlaces: [MapPlace] = []
+                    for item in response.mapItems {
+                        guard let name = item.name else { continue }
+                        let mapPlace = MapPlace(
+                            id: UUID().uuidString,
+                            name: name,
+                            rating: 4.5,
+                            category: category,
+                            time: "營業時間未知",
+                            address: item.placemark.title ?? name,
+                            image: "",
+                            coordinate: item.placemark.coordinate
+                        )
+                        if !searchedPlaces.contains(where: { $0.name == name && abs($0.coordinate.latitude - mapPlace.coordinate.latitude) < 0.0001 }) {
+                            newPlaces.append(mapPlace)
+                        }
+                    }
+                    searchedPlaces.append(contentsOf: newPlaces)
+                }
+            } catch {
+                print("Search failed: \(error.localizedDescription)")
+            }
+        }
     }
     
     private func iconForCategory(_ category: String) -> String {
         let cat = category.lowercased()
-        // 美食類 (刀叉圖示)
-        if cat.contains("美食") || cat.contains("food") || cat.contains("餐廳") || cat.contains("咖啡") || cat.contains("拉麵") || cat.contains("小吃") { return "fork" }
-        // 購物類 (購物袋圖示)
-        if cat.contains("購物") || cat.contains("shopping") || cat.contains("百貨") || cat.contains("商店") { return "shopping" }
-        // 景點/文青類 (相機圖示)
-        if cat.contains("景點") || cat.contains("attraction") || cat.contains("旅遊") || cat.contains("地標") || cat.contains("文青") || cat.contains("文化") { return "camera" }
-        // 住宿類 (床鋪圖示)
-        if cat.contains("住宿") || cat.contains("stay") || cat.contains("hotel") || cat.contains("宿") { return "bed" }
-        // 親子類 (家庭圖示)
-        if cat.contains("親子") || cat.contains("family") || cat.contains("kids") || cat.contains("children") { return "parents" }
-        return "fork" // Default
+        if cat.contains("甜點") || cat.contains("dessert") || cat.contains("冰") || cat.contains("蛋糕") || cat.contains("cafe") || cat.contains("coffee") || cat.contains("咖啡") || cat.contains("tea") || cat.contains("飲料") { return "dessert" }
+        if cat.contains("美食") || cat.contains("food") || cat.contains("餐廳") || cat.contains("拉麵") || cat.contains("小吃") || cat.contains("ramen") || cat.contains("restaurant") || cat.contains("meal") || cat.contains("dining") || cat.contains("bistro") { return "restaurant" }
+        if cat.contains("購物") || cat.contains("shopping") || cat.contains("百貨") || cat.contains("商店") || cat.contains("store") || cat.contains("market") || cat.contains("mall") { return "shopping" }
+        if cat.contains("娛樂") || cat.contains("fun") || cat.contains("遊樂") || cat.contains("親子") || cat.contains("kids") || cat.contains("amusement") || cat.contains("game") { return "fun" }
+        if cat.contains("住宿") || cat.contains("stay") || cat.contains("hotel") || cat.contains("宿") || cat.contains("民宿") || cat.contains("inn") { return "hotel" }
+        if cat.contains("景點") || cat.contains("attraction") || cat.contains("旅遊") || cat.contains("地標") || cat.contains("文青") || cat.contains("文化") || cat.contains("park") || cat.contains("museum") || cat.contains("shrine") || cat.contains("temple") { return "camera" }
+        return "camera" // Default
     }
     
     var body: some View {
@@ -65,11 +130,14 @@ struct MapView: View {
                 }
                 
                 // 3. Show searched places as pins
-                ForEach(searchedPlaces) { place in
+                ForEach(filteredSearchedPlaces) { place in
                     searchedPlacePin(place)
                 }
             }
             .ignoresSafeArea()
+            .onMapCameraChange(frequency: .onEnd) { context in
+                visibleRegion = context.region
+            }
             .onAppear {
                 if let sdPlace = tripManager.focusPlaceFromLibrary {
                     // --- 1. 跳轉到收藏庫景點 ---
@@ -86,12 +154,13 @@ struct MapView: View {
                         image: sdPlace.imageUrl ?? "",
                         coordinate: coord
                     )
-                    // Update selectedCategory so the saved pin is visible
                     let cat = mapPlace.category
                     if cat.contains("美食") || cat.contains("餐廳") || cat.contains("咖啡") || cat.contains("food") || cat.contains("拉麵") || cat.contains("小吃") {
                         selectedCategory = "美食"
-                    } else if cat.contains("文青") || cat.contains("文化") || cat.contains("藝術") {
-                        selectedCategory = "文青朝聖"
+                    } else if cat.contains("購物") || cat.contains("shopping") || cat.contains("百貨") || cat.contains("商店") {
+                        selectedCategory = "購物"
+                    } else if cat.contains("住宿") || cat.contains("stay") || cat.contains("hotel") || cat.contains("宿") {
+                        selectedCategory = "住宿"
                     } else {
                         selectedCategory = "景點"
                     }
@@ -124,6 +193,9 @@ struct MapView: View {
                 }
             }
             .onChange(of: locationManager.currentCoordinate?.latitude) { oldLat, newLat in
+                // 若用戶已手動選擇過，則不再自動跳轉回目前位置，也不要覆蓋城市文字
+                guard !isManuallySelectedRegion else { return }
+                
                 // 定位初次更新時（從 nil 到有值），移動地圖並更新城市名稱
                 // 只有在用戶沒有聚焦某個景點時才移動
                 guard tripManager.focusPlaceFromLibrary == nil, selectedPlace == nil else { return }
@@ -198,8 +270,10 @@ struct MapView: View {
                 let cat = mapPlace.category
                 if cat.contains("美食") || cat.contains("餐廳") || cat.contains("咖啡") || cat.contains("food") || cat.contains("拉麵") || cat.contains("小吃") {
                     selectedCategory = "美食"
-                } else if cat.contains("文青") || cat.contains("文化") || cat.contains("藝術") {
-                    selectedCategory = "文青朝聖"
+                } else if cat.contains("購物") || cat.contains("shopping") || cat.contains("百貨") || cat.contains("商店") {
+                    selectedCategory = "購物"
+                } else if cat.contains("住宿") || cat.contains("stay") || cat.contains("hotel") || cat.contains("宿") {
+                    selectedCategory = "住宿"
                 } else {
                     selectedCategory = "景點"
                 }
@@ -228,24 +302,24 @@ struct MapView: View {
                 HStack {
                     Button(action: onBack) {
                         Image(systemName: "chevron.left")
-                            .font(.system(size: 18, weight: .bold))
+                            .font(.system(size: 16, weight: .bold))
                             .foregroundColor(.black)
-                            .frame(width: 40, height: 40)
+                            .frame(width: 38, height: 38)
                             .background(Color.white)
                             .clipShape(Circle())
-                            .overlay(Circle().stroke(Color.black, lineWidth: 1.5))
+                            .overlay(Circle().stroke(Color.black, lineWidth: 1.8))
                     }
                     
                     Spacer()
                     
                     Button(action: { showSearch = true }) {
                         Image(systemName: "magnifyingglass")
-                            .font(.system(size: 18, weight: .bold))
+                            .font(.system(size: 16, weight: .bold))
                             .foregroundColor(.black)
-                            .frame(width: 40, height: 40)
+                            .frame(width: 38, height: 38)
                             .background(Color.white)
                             .clipShape(Circle())
-                            .overlay(Circle().stroke(Color.black, lineWidth: 1.5))
+                            .overlay(Circle().stroke(Color.black, lineWidth: 1.8))
                     }
                 }
                 
@@ -278,7 +352,15 @@ struct MapView: View {
                         ForEach(categories, id: \.self) { cat in
                             let isSelected = selectedCategory == cat
                             Button(action: {
-                                withAnimation { selectedCategory = cat }
+                                withAnimation {
+                                    if selectedCategory == cat {
+                                        selectedCategory = ""
+                                        searchedPlaces.removeAll()
+                                    } else {
+                                        selectedCategory = cat
+                                        searchMapForCategory(cat)
+                                    }
+                                }
                             }) {
                                 HStack(spacing: 4) {
                                     Text(categoryEmoji[cat] ?? "")
@@ -294,23 +376,52 @@ struct MapView: View {
                                         Capsule().fill(Color.white)
                                     } else {
                                         Capsule()
-                                            .fill(Color.white.opacity(0.15))
+                                            .fill(Color.white.opacity(0.85))
                                             .background(Capsule().fill(.ultraThinMaterial))
                                     }
                                 }
                                 .overlay(
-                                    Capsule().stroke(
-                                        isSelected ? PuboColors.navy : Color.white.opacity(0.8),
-                                        lineWidth: isSelected ? 1.5 : 0.8
+                                    Capsule().strokeBorder(
+                                        isSelected ? PuboColors.navy : Color.clear,
+                                        lineWidth: isSelected ? 1.5 : 0
                                     )
                                 )
                                 .shadow(color: Color.black.opacity(0.05), radius: 3, x: 0, y: 2)
                             }
                         }
                     }
+                    .padding(.trailing, 20)
                 }
+                .padding(.trailing, -20)
                 
                 Spacer()
+                
+                // Jump to Current Location Button
+                HStack {
+                    Spacer()
+                    Button(action: {
+                        isManuallySelectedRegion = false
+                        if let coord = locationManager.currentCoordinate {
+                            withAnimation(.easeInOut) {
+                                position = .region(MKCoordinateRegion(
+                                    center: coord,
+                                    span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05)
+                                ))
+                            }
+                            currentCity = locationManager.currentCity
+                            currentCountry = locationManager.currentCountry
+                        }
+                    }) {
+                        Image(systemName: "location.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(PuboColors.navy)
+                            .frame(width: 50, height: 50)
+                            .background(Color.white)
+                            .clipShape(Circle())
+                            .shadow(color: Color.black.opacity(0.15), radius: 5, y: 3)
+                    }
+                }
+                .padding(.bottom, selectedPlace != nil ? 220 : 30) // Move up if place card is showing
             }
             .padding(.horizontal, 20)
             .padding(.top, 8)
@@ -339,7 +450,25 @@ struct MapView: View {
                 CountryCityPicker(
                     currentCountry: $currentCountry,
                     currentCity: $currentCity,
-                    isPresented: $showCityPicker
+                    isPresented: $showCityPicker,
+                    onSelect: { country, city in
+                        isManuallySelectedRegion = true
+                        Task {
+                            let request = MKLocalSearch.Request()
+                            request.naturalLanguageQuery = "\(country) \(city)"
+                            let search = MKLocalSearch(request: request)
+                            if let response = try? await search.start(), let item = response.mapItems.first {
+                                await MainActor.run {
+                                    withAnimation(.easeInOut) {
+                                        position = .region(MKCoordinateRegion(
+                                            center: item.placemark.coordinate,
+                                            span: MKCoordinateSpan(latitudeDelta: 0.1, longitudeDelta: 0.1)
+                                        ))
+                                    }
+                                }
+                            }
+                        }
+                    }
                 )
                 .transition(.opacity)
                 .zIndex(50)
@@ -367,6 +496,9 @@ struct MapView: View {
                 withAnimation {
                     let status = sdPlace.simplifiedStatusText
                     let timeText = sdPlace.openNow == true ? (status.isEmpty ? "營業中" : "營業中 · \(status)") : (status.isEmpty ? "休息中" : "休息中 · \(status)")
+                    
+                    let socialImage = sdPlace.contents.first?.previewThumbnailUrl
+                    
                     selectedPlace = MapPlace(
                         id: sdPlace.id,
                         name: sdPlace.name,
@@ -375,7 +507,9 @@ struct MapView: View {
                         time: timeText,
                         address: sdPlace.address ?? "",
                         image: sdPlace.imageUrl ?? "",
-                        coordinate: CLLocationCoordinate2D(latitude: sdPlace.latitude, longitude: sdPlace.longitude)
+                        coordinate: CLLocationCoordinate2D(latitude: sdPlace.latitude, longitude: sdPlace.longitude),
+                        sourceImageUrl: socialImage,
+                        sourceAuthor: sdPlace.contents.first?.authorName
                     )
                 }
             }) {
@@ -412,7 +546,7 @@ struct MapView: View {
                 withAnimation { selectedPlace = place }
             }) {
                 MapPinView(
-                    icon: "📍",
+                    icon: iconForCategory(place.category),
                     hasImage: !place.image.isEmpty,
                     imageUrl: place.image,
                     name: place.name
@@ -435,43 +569,35 @@ struct MapPinView: View {
                 Circle()
                     .fill(Color.white)
                     .frame(width: 36, height: 36)
-                    .overlay(Circle().stroke(PuboColors.red, lineWidth: 1.5))
+                    .overlay(Circle().stroke(PuboColors.cardYellow, lineWidth: 2.5))
                     .shadow(color: .black.opacity(0.12), radius: 3, y: 2)
                 
                 if let uiImage = UIImage(named: icon) {
                     Image(uiImage: uiImage)
                         .resizable()
                         .scaledToFit()
-                        .frame(width: 22, height: 22)
+                        .frame(width: (icon == "restaurant" || icon == "shopping") ? 32 : 26, 
+                               height: (icon == "restaurant" || icon == "shopping") ? 32 : 26) // 放大餐廳與購物圖示
                 } else {
                     Text(emojiFallback(for: icon))
                         .font(.system(size: 18))
                 }
             }
-            
-            // Simpler Tail
-            Image(systemName: "triangle.fill")
-                .resizable()
-                .frame(width: 10, height: 6)
-                .foregroundColor(.white)
-                .rotationEffect(.degrees(180))
-                .offset(y: -4)
-                .shadow(color: .black.opacity(0.05), radius: 1, y: 1)
                 
             Text(name)
                 .font(.system(size: 10, weight: .bold))
                 .foregroundColor(.black)
                 .lineLimit(1)
-                .padding(.top, -6)
         }
     }
     private func emojiFallback(for icon: String) -> String {
         switch icon {
-        case "fork": return "🍜"
+        case "restaurant": return "🍴"
         case "shopping": return "🛍️"
-        case "camera": return "📷"
-        case "bed": return "🏨"
-        case "parents": return "👨‍👩‍👧"
+        case "dessert": return "🍰"
+        case "fun": return "🎢"
+        case "hotel": return "🏨"
+        case "camera": return "📸"
         default: return "📍"
         }
     }
@@ -652,6 +778,7 @@ struct CountryCityPicker: View {
     @Binding var currentCountry: String
     @Binding var currentCity: String
     @Binding var isPresented: Bool
+    var onSelect: ((String, String) -> Void)? = nil
     @State private var pickerStep: PickerStep = .country
     
     enum PickerStep { case country, city }
@@ -708,6 +835,7 @@ struct CountryCityPicker: View {
                             HStack {
                                 Text(countryFlag(country))
                                     .font(.system(size: 20))
+                                    .foregroundColor(.black) // Temporary fix
                                 Text(country)
                                     .font(.system(size: 15, weight: currentCountry == country ? .black : .medium))
                                     .foregroundColor(.black)
@@ -732,6 +860,7 @@ struct CountryCityPicker: View {
                     ForEach(cities, id: \.self) { city in
                         Button(action: {
                             currentCity = city
+                            onSelect?(currentCountry, city)
                             withAnimation { isPresented = false }
                         }) {
                             HStack {
@@ -814,19 +943,6 @@ struct PlaceDetailCard: View {
     private let collapsedHeight: CGFloat = 255
     private let expandedFraction: CGFloat = 0.80
 
-    private var businessStatus: (text: String, color: Color, subText: String)? {
-        let t = place.time
-        if t.contains("營業中") {
-            let sub = t.replacingOccurrences(of: "營業中", with: "").replacingOccurrences(of: "·", with: "").trimmingCharacters(in: .whitespaces)
-            return ("營業中", Color(hex: "1B8A4A"), sub.isEmpty ? "目前開放中" : sub)
-        } else if t.contains("暫停營業") {
-            return ("暫停營業", Color(hex: "C62828"), "目前不對外開放")
-        } else if t.contains("休息中") || (!t.isEmpty && t != "暫時營業") {
-            let sub = t.replacingOccurrences(of: "休息中", with: "").replacingOccurrences(of: "·", with: "").trimmingCharacters(in: .whitespaces)
-            return ("休息中", Color(hex: "C62828"), sub.isEmpty ? "目前暫停營業" : sub)
-        }
-        return nil
-    }
 
     var body: some View {
         GeometryReader { geo in
@@ -884,16 +1000,8 @@ struct PlaceDetailCard: View {
 
                             // 1. (Title moved to header)
 
-                            // 2. Rating & Category
+                            // 2. Category
                             HStack(spacing: 8) {
-                                HStack(spacing: 3) {
-                                    Image(systemName: "star.fill").font(.system(size: 10))
-                                    Text(String(format: "%.1f", place.rating)).font(.system(size: 12, weight: .black))
-                                }
-                                .foregroundColor(PuboColors.cardOrange)
-                                .padding(.horizontal, 8).padding(.vertical, 4)
-                                .background(PuboColors.cardOrange.opacity(0.12)).cornerRadius(7)
-
                                 Text(place.category)
                                     .font(.system(size: 11, weight: .semibold))
                                     .foregroundColor(.gray)
@@ -902,37 +1010,7 @@ struct PlaceDetailCard: View {
                             }
                             .padding(.bottom, 10)
 
-                            // 3. Business Status + Hours (always show hours)
-                            let hoursText = place.time
-                            if !hoursText.isEmpty {
-                                HStack(spacing: 6) {
-                                    if let status = businessStatus {
-                                        Text(status.text)
-                                            .font(.system(size: 13, weight: .bold))
-                                            .foregroundColor(status.color)
-                                        Text("·")
-                                            .font(.system(size: 13))
-                                            .foregroundColor(.gray)
-                                    }
-                                    // Always show the raw opening hours
-                                    Text(hoursText
-                                        .replacingOccurrences(of: "營業中 · ", with: "")
-                                        .replacingOccurrences(of: "營業中 · ", with: "")
-                                        .replacingOccurrences(of: "休息中 · ", with: "")
-                                        .replacingOccurrences(of: "休息中 · ", with: "")
-                                        .trimmingCharacters(in: .whitespaces))
-                                        .font(.system(size: 13))
-                                        .foregroundColor(.gray)
-                                }
-                                .padding(.bottom, 8)
-                            } else if let status = businessStatus {
-                                HStack(spacing: 6) {
-                                    Text(status.text)
-                                        .font(.system(size: 13, weight: .bold))
-                                        .foregroundColor(status.color)
-                                }
-                                .padding(.bottom, 8)
-                            }
+
 
                             // 4. Address
                             let addr = detailedAddress ?? place.address
@@ -969,11 +1047,15 @@ struct PlaceDetailCard: View {
                             }
 
                             // 5. Image
-                            if let sourceUrl = place.sourceImageUrl, let url = URL(string: sourceUrl) {
+                            let fixedSourceUrl = place.sourceImageUrl?.replacingOccurrences(of: "pubo-images/", with: "pubo_image/") ?? ""
+                            let fixedPlaceImage = place.image.replacingOccurrences(of: "pubo-images/", with: "pubo_image/")
+                            
+                            if !fixedSourceUrl.isEmpty, let url = URL(string: fixedSourceUrl) ?? URL(string: fixedSourceUrl.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "") {
                                 ZStack(alignment: .bottomLeading) {
-                                    AsyncImage(url: url) { phase in
-                                        if let img = phase.image { img.resizable().aspectRatio(contentMode: .fill) }
-                                        else { Color.gray.opacity(0.08) }
+                                    CachedAsyncImage(url: url) { img in
+                                        img.resizable().aspectRatio(contentMode: .fill)
+                                    } placeholder: {
+                                        Color.gray.opacity(0.08).overlay(ProgressView())
                                     }
                                     .frame(maxWidth: .infinity).frame(height: 180).clipped()
 
@@ -987,10 +1069,11 @@ struct PlaceDetailCard: View {
                                 }
                                 .cornerRadius(16)
                                 .padding(.bottom, 20)
-                            } else if !place.image.isEmpty {
-                                AsyncImage(url: URL(string: place.image)) { phase in
-                                    if let img = phase.image { img.resizable().aspectRatio(contentMode: .fill) }
-                                    else { Color.gray.opacity(0.08) }
+                            } else if !fixedPlaceImage.isEmpty, let url = URL(string: fixedPlaceImage) ?? URL(string: fixedPlaceImage.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "") {
+                                CachedAsyncImage(url: url) { img in
+                                    img.resizable().aspectRatio(contentMode: .fill)
+                                } placeholder: {
+                                    Color.gray.opacity(0.08).overlay(ProgressView())
                                 }
                                 .frame(maxWidth: .infinity).frame(height: 180).clipped()
                                 .cornerRadius(16)
@@ -1008,55 +1091,7 @@ struct PlaceDetailCard: View {
                                 .padding(.bottom, 20)
                             }
 
-                            // 6. AI Description (Always visible)
-                            VStack(alignment: .leading, spacing: 20) {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Label("地點介紹", systemImage: "sparkles")
-                                        .font(.system(size: 15, weight: .bold)).foregroundColor(PuboColors.navy)
-                                    
-                                    if isLoadingDescription {
-                                        HStack(spacing: 8) {
-                                            ProgressView().scaleEffect(0.8)
-                                            Text("AI 正在分析中...").font(.system(size: 13)).foregroundColor(.gray)
-                                        }
-                                    } else if let desc = description {
-                                        Text(desc).font(.system(size: 14)).foregroundColor(.black.opacity(0.8))
-                                            .lineSpacing(6).fixedSize(horizontal: false, vertical: true)
-                                    } else {
-                                        Text("暫無 AI 景點介紹資訊").font(.system(size: 14)).foregroundColor(.gray)
-                                    }
-                                }
-
-                                // Reviews
-                                if proReview != nil || conReview != nil {
-                                    VStack(alignment: .leading, spacing: 12) {
-                                        Label("網友評價", systemImage: "hand.thumbsup.fill")
-                                            .font(.system(size: 15, weight: .bold)).foregroundColor(PuboColors.navy)
-                                        
-                                        if let pro = proReview, !pro.isEmpty {
-                                            HStack(alignment: .top, spacing: 12) {
-                                                Text("👍").font(.system(size: 16))
-                                                Text(pro).font(.system(size: 14)).foregroundColor(.black.opacity(0.75))
-                                                    .fixedSize(horizontal: false, vertical: true)
-                                                Spacer()
-                                            }
-                                            .padding(14).background(Color(hex: "FFF3C4").opacity(0.7)).cornerRadius(12)
-                                        }
-                                        
-                                        if let con = conReview, !con.isEmpty {
-                                            HStack(alignment: .top, spacing: 12) {
-                                                Text("😣").font(.system(size: 16))
-                                                Text(con).font(.system(size: 14)).foregroundColor(.black.opacity(0.75))
-                                                    .fixedSize(horizontal: false, vertical: true)
-                                                Spacer()
-                                            }
-                                            .padding(14).background(Color(hex: "FFE0D0").opacity(0.5)).cornerRadius(12)
-                                        }
-                                    }
-                                    .transition(.opacity)
-                                }
-                            }
-                            .padding(.bottom, 24)
+                            // AI Description & Reviews sections removed as per simplified details requirements
 
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1150,48 +1185,8 @@ struct PlaceDetailCard: View {
     }
 
     private func fetchAIDescription() {
-        guard description == nil else { return }
-        isLoadingDescription = true
-        
-        Task {
-            do {
-                let urlString = "\(aiServerBaseUrl)/api/v1/analyze/place"
-                guard let url = URL(string: urlString) else { return }
-                
-                var request = URLRequest(url: url)
-                request.httpMethod = "POST"
-                request.timeoutInterval = 10.0 // Add timeout
-                request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-                
-                let body: [String: Any] = ["name": place.name, "address": place.address, "category": place.category]
-                request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-                
-                let (data, _) = try await URLSession.shared.data(for: request)
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    await MainActor.run {
-                        if let desc = json["description"] as? String, !desc.isEmpty { 
-                            self.description = desc 
-                        } else {
-                            self.description = "目前尚無此地點的詳細介紹文。"
-                        }
-                        if let pro = json["pro_comment"] as? String { self.proReview = pro }
-                        if let con = json["con_comment"] as? String { self.conReview = con }
-                        self.isLoadingDescription = false
-                    }
-                } else {
-                    await MainActor.run {
-                        self.description = "無法解析 AI 回傳內容。"
-                        self.isLoadingDescription = false
-                    }
-                }
-            } catch { 
-                print("❌ AI Fetch Error: \(error.localizedDescription)")
-                await MainActor.run { 
-                    self.description = "連線失敗：請檢查 AI 伺服器 (\(aiServerBaseUrl)) 是否運作中。"
-                    self.isLoadingDescription = false 
-                } 
-            }
-        }
+        // Disabled background Gemini API calls as per simplified details requirements
+        return
     }
 }
 

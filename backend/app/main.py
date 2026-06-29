@@ -5,22 +5,22 @@ import json
 import random
 import uuid
 import os
-from sqlalchemy.orm import Session
+from datetime import datetime, timedelta
 from .models import schemas
-from .models.database import get_db, init_db, Task, SessionLocal, AIAnalysisCache, CuratedPost, Content, Place, ContentPlaceAssociation
+from .models.database import get_db, init_db, Task, SessionLocal, AIAnalysisCache, CuratedPost, Content, Place, ContentPlaceAssociation, PlaceCache, FirestoreSession
 from .services.places_service import PlacesService
 from .services.apify_service import ApifyService
 from .services.nlp_service import NLPService
 from .services.youtube_service import YouTubeService
 from .services.image_service import ImageService
-from .api import trips, collection
+from .api import collection, trips
 import firebase_admin
 from firebase_admin import credentials
 
 app = FastAPI()
 
-app.include_router(trips.router, prefix="/api/v1", tags=["trips"])
 app.include_router(collection.router, prefix="/api/v1", tags=["collection"])
+app.include_router(trips.router, prefix="/api/v1", tags=["trips"])
 
 # 初始化服務
 apify_service = ApifyService()
@@ -60,7 +60,7 @@ async def debug_places(query: str):
         headers = {
             "Content-Type": "application/json",
             "X-Goog-Api-Key": places_service.api_key,
-            "X-Goog-FieldMask": "places.name,places.id,places.formattedAddress,places.location,places.types,places.rating,places.userRatingCount,places.displayName,places.primaryType,places.currentOpeningHours,places.regularOpeningHours"
+            "X-Goog-FieldMask": "places.name,places.id,places.formattedAddress,places.location,places.types,places.displayName,places.primaryType"
         }
         payload = {"textQuery": query, "maxResultCount": 1, "languageCode": "zh-TW"}
         
@@ -69,6 +69,34 @@ async def debug_places(query: str):
         return {"status_code": response.status_code, "response": response.json(), "key_prefix": places_service.api_key[:5] if places_service.api_key else None}
     except Exception as e:
         return {"error": str(e)}
+
+def normalize_url(url: str) -> str:
+    """Normalize URL to improve cache hit rate"""
+    import re
+    from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+    
+    url = url.strip()
+    
+    # Extract Instagram shortcode and normalize
+    ig_match = re.search(r'instagram\.com/(?:p|reels|tv|sh)/([^/?#\s]+)', url)
+    if ig_match:
+        shortcode = ig_match.group(1).rstrip('/')
+        return f"https://www.instagram.com/p/{shortcode}/"
+    
+    # Remove common tracking parameters
+    try:
+        parsed = urlparse(url)
+        if parsed.query:
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            # Remove tracking params
+            tracking_params = {'igsh', 'igshid', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'img_index', 'fbclid'}
+            filtered = {k: v for k, v in params.items() if k not in tracking_params}
+            new_query = urlencode(filtered, doseq=True)
+            url = urlunparse(parsed._replace(query=new_query))
+    except Exception:
+        pass
+    
+    return url
 
 async def process_share_task(task_id: str, url: str):
     """
@@ -87,10 +115,186 @@ async def process_share_task(task_id: str, url: str):
     
         source_type = "instagram"
         print(f"TASK {task_id}: 開始處理 {url}")
+        # Normalize URL to improve cache hit rate
+        normalized_url = normalize_url(url)
         
-        # 1. 爬取內容
+        # --- Layer 1: URL Cache (Check if content already exists) ---
+        existing_content = db.query(Content).filter(Content.source_url == normalized_url).first()
+        if not existing_content:
+            existing_content = db.query(Content).filter(Content.source_url == url).first()
+        if existing_content:
+            # Query associations from Firestore
+            associations = db.query(ContentPlaceAssociation).filter(ContentPlaceAssociation.content_id == existing_content.id).all()
+            
+            # Check if the cached image URL is the old broken format
+            is_broken_image = False
+            if existing_content.preview_thumbnail_url and "storage.googleapis.com" in existing_content.preview_thumbnail_url and "token=" not in existing_content.preview_thumbnail_url:
+                is_broken_image = True
+                
+            if len(associations) == 0 or is_broken_image:
+                print(f"⚠️ [Cache Miss] Found content but 0 associations or broken image URL. Re-extracting for {url}")
+                existing_content = None # Force re-extraction
+            else:
+                print(f"🎯 [Cache Hit] Layer 1: URL Cache Hit for {url}")
+                content_base = schemas.ContentBase(
+                    source_type=existing_content.source_type,
+                    source_url=existing_content.source_url,
+                    title=existing_content.title,
+                    text=existing_content.text,
+                    author_name=existing_content.author_name,
+                    author_avatar_url=existing_content.author_avatar_url,
+                    preview_thumbnail_url=existing_content.preview_thumbnail_url,
+                    published_at=existing_content.published_at
+                )
+                suggested_places = []
+                for assoc in associations:
+                    place_doc = db.db_client.collection("places").document(str(assoc.place_id)).get()
+                    place = Place(_doc_id=place_doc.id, **place_doc.to_dict()) if place_doc.exists else None
+                    if place:
+                        suggested_places.append(schemas.ContentPlaceInfo(
+                            place=schemas.PlaceBase(
+                                place_id=place.place_id,
+                                name=place.name,
+                                address=place.address,
+                                latitude=place.latitude,
+                                longitude=place.longitude,
+                                category=place.category,
+                                image_url=place.image_url,
+                                rating=place.rating,
+                                user_ratings_total=place.user_ratings_total,
+                                opening_hours=place.opening_hours
+                            ),
+                            evidence_text=assoc.evidence_text,
+                            confidence_score=assoc.confidence_score
+                        ))
+                
+                extraction_response = schemas.ExtractionResponse(
+                    content=content_base,
+                    suggested_places=suggested_places
+                )
+                task.result = json.loads(extraction_response.json())
+                task.status = "completed"
+                task.progress = 1.0
+                db.commit()
+                return
+        # --- End Layer 1 ---
+
+        # --- Layer 1.5: Task Cache (Check recent successful tasks with same URL) ---
+        for search_url in [normalized_url, url]:
+            existing_tasks = db.query(Task).filter(
+                Task.target_url == search_url,
+                Task.status == "completed"
+            ).all()
+            for existing_task in existing_tasks:
+                if existing_task and existing_task.result and existing_task.task_id != task_id:
+                    # Check if the task result contains a broken image URL
+                    is_broken = False
+                    cached_thumb = existing_task.result.get("content", {}).get("preview_thumbnail_url")
+                    if cached_thumb and "storage.googleapis.com" in cached_thumb and "token=" not in cached_thumb:
+                        is_broken = True
+                        
+                    if not is_broken:
+                        print(f"🎯 [Cache Hit] Layer 1.5: Task Cache Hit for {url}")
+                        task.result = existing_task.result
+                        task.status = "completed"
+                        task.progress = 1.0
+                        db.commit()
+                        return
+        # --- End Layer 1.5 ---
+        
+        # 1. 判斷來源與爬取內容
         scraped_data = None
-        if not url.startswith("http://") and not url.startswith("https://"):
+        extracted_places = []
+        is_google_maps = "maps.app.goo.gl" in url or "google.com/maps" in url
+        
+        if is_google_maps:
+            source_type = "google_maps"
+            place_name = "Google Maps Location"
+            
+            # Extract URL from text using regex
+            import re
+            import requests
+            url_match = re.search(r'https?://[^\s]+', url)
+            if url_match:
+                actual_url = url_match.group(0)
+                try:
+                    # Fetch the page to get the true title
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+                        "Accept-Language": "zh-TW,zh;q=0.9"
+                    }
+                    resp = requests.get(actual_url, headers=headers, timeout=5)
+                    title_match = re.search(r'<title>(.*?)</title>', resp.text, re.IGNORECASE)
+                    if title_match:
+                        full_title = title_match.group(1)
+                        import html
+                        full_title = html.unescape(full_title)
+                        # Google Maps titles are usually "Name - Google Maps"
+                        clean_title = full_title.replace(" - Google Maps", "").replace("Google Maps - ", "").replace(" - Google 網頁版地圖", "").strip()
+                        if clean_title and "Google" not in clean_title:
+                            place_name = clean_title
+                    
+                    # If title was empty or default, parse /maps/place/ from HTML body
+                    if place_name == "Google Maps Location":
+                        import urllib.parse
+                        place_matches = re.findall(r'/maps/place/([^/@?"\']+)', resp.text)
+                        for pm in place_matches:
+                            try:
+                                decoded = urllib.parse.unquote(pm)
+                                if "%" in decoded:
+                                    decoded = urllib.parse.unquote(decoded)
+                                decoded = decoded.replace("+", " ").strip()
+                                # Check if it is a coordinate
+                                is_coord = re.match(r'^[\d\.,\-\s]+$', decoded) is not None
+                                if decoded and not is_coord:
+                                    place_name = decoded
+                                    break
+                            except Exception as ex:
+                                print(f"⚠️ [Backend] Error decoding HTML place match: {ex}")
+                except Exception as e:
+                    print(f"⚠️ [Backend] Error fetching Google Maps title: {e}")
+            
+            # Fallback if scraping failed
+            if place_name == "Google Maps Location":
+                lines = [line.strip() for line in url.split("\n") if line.strip()]
+                if len(lines) > 0 and not lines[0].startswith("http"):
+                    place_name = lines[0]
+            
+            # 🔥 極度暴力清洗：直接從源頭砍掉地址、加號碼、中間點
+            address = ""
+            original_search_query = place_name
+            if place_name and place_name != "Google Maps Location":
+                import re
+                # 1. 將 `·` 或 `•` 後面的東西切分出來，當作 address 保留
+                parts = re.split(r'\s*[·•]\s*', place_name)
+                clean_name = parts[0]
+                if len(parts) > 1:
+                    address = parts[1]
+                
+                # 針對 clean_name 進行暴力清洗
+                # 2. 砍掉 Plus Code (如 EF56+78)
+                clean_name = re.sub(r'[A-Z0-9]{2,4}\+[A-Z0-9]{2,4}.*$', '', clean_name)
+                # 3. 砍掉常見的日本英文地址開頭 (如 1 Chome, 2-chome)
+                clean_name = re.sub(r'\s*\d+\s*[Cc]home.*$', '', clean_name)
+                # 4. 砍掉樓層 (如 1F, B1)
+                clean_name = re.sub(r'\s*\d+[Ff]\b.*$', '', clean_name)
+                clean_name = re.sub(r'\s*[Bb]\d+\b.*$', '', clean_name)
+                clean_name = clean_name.strip()
+                
+                place_name = clean_name
+            
+            scraped_data = {
+                "text": url,
+                "title": f"來自 Google Maps: {place_name}",
+                "preview_thumbnail_url": None,
+                "author_name": None,
+                "author_avatar_url": None
+            }
+            # 【核心修正】將 address 放入 dictionary 中，供 stage_1_query 使用
+            extracted_places = [{"name": place_name, "search_query": original_search_query, "address": address, "category": "景點"}]
+            print(f"🎯 [Backend] Detected Google Maps share. Extracted name: {place_name}")
+            
+        elif not url.startswith("http://") and not url.startswith("https://"):
             source_type = "plain_text"
             scraped_data = {
                 "text": url,
@@ -124,8 +328,10 @@ async def process_share_task(task_id: str, url: str):
         task.progress = 0.4
         db.commit()
 
-        # 2. 使用 LLM 解析地點名稱 (Sync -> Threadpool)
-        extracted_places = await run_in_threadpool(nlp_service.extract_places_from_text, scraped_data["text"])
+        # 2. 使用 LLM 解析地點名稱 (僅在非 Google Maps 時執行)
+        if not extracted_places:
+            print("🤖 [Backend] Sending to NLP Service...")
+            extracted_places = await run_in_threadpool(nlp_service.extract_places_from_text, scraped_data["text"])
         
         task.progress = 0.6
         db.commit()
@@ -141,27 +347,63 @@ async def process_share_task(task_id: str, url: str):
             
             print(f"🔍 [Backend] Searching for: {search_name} (Display: {display_name}, Country: {inferred_country})")
             
-            # --- 搜尋重試機制 (3-Stage Fallback) ---
-            # 1. 精確搜尋 (國家 + 城市 + 搜尋字串)
-            google_place = await run_in_threadpool(places_service.search_place, f"{inferred_country} {search_name}")
+            # --- Layer 2: Place Cache ---
+            from app.models.database import PlaceCache
             
-            # 2. 失敗則嘗試：名稱 + 城市
-            if not google_place:
-                retry_query_1 = f"{search_name} {p.get('city', '')}"
-                print(f"🔄 [Backend] Precise search failed. Retrying: {retry_query_1}")
-                google_place = await run_in_threadpool(places_service.search_place, retry_query_1)
+            cache_key = f"{inferred_country}_{p.get('city', '')}_{search_name}"
             
-            # 3. 失敗則嘗試：直接搜店名 (寬鬆搜尋)
-            if not google_place:
-                retry_query_2 = display_name
-                print(f"🔄 [Backend] City search failed. Retrying with name only: {retry_query_2}")
-                google_place = await run_in_threadpool(places_service.search_place, retry_query_2)
+            # Use separate DB session inside threadpool? No, we are in async def but calling sync db methods.
+            # Fast check cache
+            cached_place = db.query(PlaceCache).filter(PlaceCache.search_key == cache_key).first()
+            if cached_place and cached_place.updated_at > datetime.utcnow() - timedelta(days=7):
+                if cached_place.status == "not_found":
+                    print(f"🛑 [Cache Hit] Layer 2: Negative Cache for {cache_key}. Skipping...")
+                    return None
+                elif cached_place.google_place_id:
+                    db_p = db.query(Place).filter(Place.place_id == cached_place.google_place_id).first()
+                    if db_p:
+                        print(f"🎯 [Cache Hit] Layer 2: Found {cache_key} in Place DB")
+                    place_data = {
+                        "place_id": db_p.place_id,
+                        "name": db_p.name,
+                        "address": db_p.address,
+                        "latitude": db_p.latitude,
+                        "longitude": db_p.longitude,
+                        "category": db_p.category,
+                        "image_url": db_p.image_url,
+                        "rating": db_p.rating,
+                        "user_ratings_total": db_p.user_ratings_total,
+                        "opening_hours": db_p.opening_hours,
+                        "google_place_id": cached_place.google_place_id
+                    }
+                    return schemas.ContentPlaceInfo(
+                        place=schemas.PlaceBase(**place_data),
+                        evidence_text=p.get("evidence_text"),
+                        confidence_score=p.get("confidence_score", 0.0)
+                    )
 
-            # 4. 終極方案：如果 Google Maps API 都找不到，呼叫 AI 強制給出近似地點資訊
-            ai_fallback_data = None
+            # --- New 2-Stage Fallback Search ---
+            # Stage 1: {Country} {City} {Name} {Address}
+            stage_1_query = f"{inferred_country} {p.get('city', '')} {search_name} {p.get('address', '')}".strip()
+            print(f"🔍 [Backend] Stage 1 Search: {stage_1_query}")
+            google_place = await run_in_threadpool(places_service.search_place, stage_1_query)
+            
+            # Stage 2: {Name} only (Loose Search)
             if not google_place:
-                print(f"⚠️ [Backend] All Places API searches failed for {display_name}. Falling back to AI Geocoding...")
-                ai_fallback_data = await run_in_threadpool(nlp_service.ai_geocoding, display_name, inferred_country, p.get('city', ''))
+                stage_2_query = display_name
+                print(f"🔄 [Backend] Stage 1 failed. Stage 2 (Loose Search): {stage_2_query}")
+                google_place = await run_in_threadpool(places_service.search_place, stage_2_query)
+
+            if not google_place:
+                print(f"⚠️ [Backend] All Places API searches failed for {display_name}. Saving to Negative Cache and Skipping...")
+                if cached_place:
+                    cached_place.status = "not_found"
+                    cached_place.updated_at = datetime.utcnow()
+                else:
+                    new_cache = PlaceCache(search_key=cache_key, status="not_found")
+                    db.add(new_cache)
+                db.commit()
+                return None
             
             place_data = {
                 "place_id": f"temp_{random.randint(1000, 9999)}",
@@ -173,63 +415,66 @@ async def process_share_task(task_id: str, url: str):
                 "google_place_id": None
             }
 
-            if google_place:
-                formatted_address = google_place.get("formattedAddress", "")
-                
-                # Use Google Place ID as the primary ID to ensure deduplication on client side
-                real_id = google_place.get("name", "").split("/")[-1] if "/" in google_place.get("name", "") else google_place.get("id")
-                
-                place_data["place_id"] = real_id
-                place_data["google_place_id"] = real_id
-                place_data["address"] = formatted_address
-                
-                location = google_place.get("location", {})
-                place_data["latitude"] = location.get("latitude", 0.0)
-                place_data["longitude"] = location.get("longitude", 0.0)
-                
-                place_data["rating"] = google_place.get("rating")
-                place_data["user_ratings_total"] = google_place.get("userRatingCount")
-                place_data["opening_hours"] = google_place.get("regularOpeningHours")
-                place_data["open_now"] = google_place.get("currentOpeningHours", {}).get("openNow")
-                
-                if "primaryType" in google_place:
-                    place_data["category"] = google_place["primaryType"].replace("_", " ").title()
-            elif ai_fallback_data:
-                # Use AI Geocoding Data as last resort
-                place_data["address"] = ai_fallback_data.get("address")
-                place_data["latitude"] = ai_fallback_data.get("latitude", 0.0)
-                place_data["longitude"] = ai_fallback_data.get("longitude", 0.0)
-                print(f"✅ [Backend] Successfully applied AI Geocoding for {display_name}")
+            # Use the place_id from Text Search Advanced, no more Place Details API calls
+            search_id = google_place.get("id") or (google_place.get("name", "").split("/")[-1] if "/" in google_place.get("name", "") else google_place.get("name"))
+            real_id = search_id
+            
+            place_data["place_id"] = real_id
+            place_data["google_place_id"] = real_id
+            place_data["address"] = google_place.get("formattedAddress", "")
+            
+            # 🌟 修正：用 Google 官方正式名稱覆蓋，確保 100% 精確與 Google Maps 一致
+            if "displayName" in google_place and isinstance(google_place["displayName"], dict):
+                place_data["name"] = google_place["displayName"].get("text", display_name)
+            
+            location = google_place.get("location", {})
+            place_data["latitude"] = location.get("latitude", 0.0)
+            place_data["longitude"] = location.get("longitude", 0.0)
+            
+            # 雖然我們從 FieldMask 中移除了 rating/opening_hours，這裡保留以防未來擴充，safe.get 回傳 None
+            place_data["rating"] = google_place.get("rating")
+            place_data["user_ratings_total"] = google_place.get("userRatingCount")
+            place_data["opening_hours"] = google_place.get("regularOpeningHours")
+            place_data["open_now"] = google_place.get("currentOpeningHours", {}).get("openNow")
+            
+            if "primaryType" in google_place:
+                place_data["category"] = google_place["primaryType"].replace("_", " ").title()
 
             # 🔴 抗灰格方案：如果這個景點目前還沒有圖片，則繼承貼文原始封面圖 (防止行程出現灰色方塊)
             if not place_data.get("image_url") and post_thumbnail:
                 place_data["image_url"] = post_thumbnail
-            
-            # 🔵 終極補水方案：如果還是沒圖片，則透過搜尋引擎強行「補照片」
-            if not place_data.get("image_url"):
-                fallback_img = await run_in_threadpool(image_service.fetch_fallback_image, search_name)
-                if fallback_img:
-                    place_data["image_url"] = fallback_img
                     
-            # ☁️ 上傳到 Supabase 獲得永久存取連結
-            if place_data.get("image_url"):
-                permanent_url = await run_in_threadpool(image_service.upload_to_supabase, place_data["image_url"])
-                place_data["image_url"] = permanent_url
+            original_image_url = place_data.get("image_url")
+            place_data["image_url"] = "" # 設為空，讓前端顯示 loading 狀態
 
-            return schemas.ContentPlaceInfo(
+            # Create transient Place object to return, the caller loop will save it and update PlaceCache
+            info_to_return = schemas.ContentPlaceInfo(
                 place=schemas.PlaceBase(**place_data),
                 evidence_text=p.get("evidence_text"),
                 confidence_score=p.get("confidence_score", 0.0)
             )
+            # Attach cache_key for the caller to save it
+            setattr(info_to_return, "_cache_key", cache_key)
+            setattr(info_to_return, "_google_place_id", real_id)
+            setattr(info_to_return, "_original_image_url", original_image_url)
+            return info_to_return
 
-        # 並行執行所有搜尋，同時傳入貼文封面作為備援圖
-        post_thumb = scraped_data.get("preview_thumbnail_url")
+        # 先將封面圖片在前景上傳，因為只上傳一張圖片很快（約1秒），可以讓使用者馬上看到！
+        # 其餘景點的多張圖片則維持在背景非同步上傳
+        original_post_thumb = scraped_data.get("preview_thumbnail_url")
+        post_thumb = original_post_thumb
         if post_thumb:
-            # 提前把主封面也存入 Supabase 變成永久網址，供下方景點繼承
-            post_thumb = await run_in_threadpool(image_service.upload_to_supabase, post_thumb)
-            scraped_data["preview_thumbnail_url"] = post_thumb
+            try:
+                print(f"TASK {task_id}: 正在前景上傳封面圖片...")
+                permanent_thumb = await run_in_threadpool(image_service.upload_to_firebase, post_thumb)
+                if permanent_thumb:
+                    scraped_data["preview_thumbnail_url"] = permanent_thumb
+                    post_thumb = permanent_thumb
+            except Exception as e:
+                print(f"TASK {task_id}: 封面圖片上傳失敗: {e}")
             
-        enriched_places = await asyncio.gather(*(enrich_place(p, post_thumb) for p in extracted_places))
+        enriched_places_raw = await asyncio.gather(*(enrich_place(p, post_thumb) for p in extracted_places))
+        enriched_places = [p for p in enriched_places_raw if p is not None]
         
         task.progress = 0.9
         db.commit()
@@ -299,13 +544,26 @@ async def process_share_task(task_id: str, url: str):
                 ContentPlaceAssociation.place_id == db_place.id
             ).first()
             if not assoc:
-                assoc = ContentPlaceAssociation(
+                db.add(ContentPlaceAssociation(
                     content_id=db_content.id,
                     place_id=db_place.id,
                     evidence_text=info.evidence_text,
                     confidence_score=info.confidence_score
-                )
-                db.add(assoc)
+                ))
+            
+            # --- Save to PlaceCache ---
+            if hasattr(info, "_cache_key"):
+                cache_key = info._cache_key
+                google_pid = info._google_place_id
+                db_cache = db.query(PlaceCache).filter(PlaceCache.search_key == cache_key).first()
+                if not db_cache:
+                    db_cache = PlaceCache(search_key=cache_key, place_id=db_place.id, google_place_id=google_pid, status="found")
+                    db.add(db_cache)
+                else:
+                    db_cache.place_id = db_place.id
+                    db_cache.google_place_id = google_pid
+                    db_cache.status = "found"
+                    db_cache.updated_at = datetime.utcnow()
         
         db.commit()
         
@@ -314,6 +572,22 @@ async def process_share_task(task_id: str, url: str):
         task.status = "completed"
         task.progress = 1.0
         db.commit()
+
+        # 6. 背景非同步轉存景點圖片到 Firebase (不阻塞客戶端)
+        print(f"TASK {task_id}: 開始背景轉存圖片...")
+        try:
+            for info in enriched_places:
+                orig_url = getattr(info, "_original_image_url", None)
+                if orig_url:
+                    permanent_url = await run_in_threadpool(image_service.upload_to_firebase, orig_url)
+                    if permanent_url:
+                        db_place = db.query(Place).filter(Place.place_id == info.place.place_id).first()
+                        if db_place:
+                            db_place.image_url = permanent_url
+                            db.commit()
+            print(f"TASK {task_id}: 背景圖片轉存完成！")
+        except Exception as e:
+            print(f"TASK {task_id}: 背景圖片轉存失敗: {e}")
 
     except Exception as e:
         print(f"Task Error: {e}")
@@ -324,9 +598,9 @@ async def process_share_task(task_id: str, url: str):
         db.close()
 
 @app.post("/api/v1/share", response_model=schemas.TaskResponse)
-async def share_content(request: schemas.ShareRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def share_content(request: schemas.ShareRequest, background_tasks: BackgroundTasks, db: FirestoreSession = Depends(get_db)):
     """
-    接收社群分享連結，啟動異步解析任務
+    接收社群分享連結，啟期異步解析任務
     """
     task_id = str(uuid.uuid4())
     
@@ -349,7 +623,7 @@ async def share_content(request: schemas.ShareRequest, background_tasks: Backgro
     )
 
 @app.get("/api/v1/task/{task_id}", response_model=schemas.TaskResponse)
-async def get_task_status(task_id: str, response: Response, db: Session = Depends(get_db)):
+async def get_task_status(task_id: str, response: Response, db: FirestoreSession = Depends(get_db)):
     """
     查詢任務狀態與結果
     """
@@ -367,19 +641,16 @@ async def get_task_status(task_id: str, response: Response, db: Session = Depend
     )
 
 @app.get("/api/v1/library/contents", response_model=List[schemas.ContentResponse])
-async def list_contents(db: Session = Depends(get_db)):
+async def list_contents(db: FirestoreSession = Depends(get_db)):
     """
     顯示收藏庫中的內容模式 (連結模式)
     """
-    from sqlalchemy.orm import joinedload
-    contents = db.query(Content).options(
-        joinedload(Content.place_associations).joinedload(ContentPlaceAssociation.place)
-    ).filter(Content.is_collected == 1).order_by(Content.created_at.desc()).all()
-    
+    contents = db.query(Content).filter(Content.is_collected == 1).all()
+    contents.sort(key=lambda x: getattr(x, "created_at", None) or datetime.min, reverse=True)
     return contents
     
 @app.get("/api/v1/library/places", response_model=List[schemas.PlaceBase])
-async def list_places(db: Session = Depends(get_db)):
+async def list_places(db: FirestoreSession = Depends(get_db)):
     """
     顯示收藏庫中的地點模式 (地點模式)
     """
@@ -398,179 +669,70 @@ async def list_places(db: Session = Depends(get_db)):
         opening_hours=p.opening_hours
     ) for p in places]
 
-@app.post("/api/v1/analyze/place", response_model=schemas.AnalyzeResponse)
-async def analyze_place(request: schemas.AnalyzeRequest, db: Session = Depends(get_db)):
-    """
-    使用 AI 生成地點介紹與正反點評 (包含 Cache 機制)
-    """
-    # 1. Check Cache
-    cache_entry = db.query(AIAnalysisCache).filter(
-        AIAnalysisCache.place_name == request.name,
-        AIAnalysisCache.address == request.address
-    ).first()
-    
-    # NEW: Detect and skip cache if it contains the fallback template text
-    is_template = False
-    if cache_entry:
-        res = cache_entry.result
-        desc = res.get("description", "")
-        # Robust Template Detection
-        template_keywords = ["備受好評", "熱門地點", "值得一訪", "附近交通可能較擁擠"]
-        if any(keyword in desc for keyword in template_keywords):
-            is_template = True
-            print(f"♻️ [Cache Invalidation] Fallback template detected for: {request.name}. Wiping and re-generating...")
-            db.delete(cache_entry)
-            db.commit()
-    
-    if cache_entry and not is_template:
-        print(f"🚀 [Cache Hit] Using existing analysis for: {request.name}")
-        res = cache_entry.result
-        return schemas.AnalyzeResponse(
-            description=res.get("description", ""),
-            pro_comment=res.get("pro_comment", ""),
-            con_comment=res.get("con_comment", "")
-        )
-    
-    # 2. Call AI (with country/city context)
-    print(f"🤖 [Analyze] Calling AI for: {request.name} (country={request.country}, city={request.city})")
-    result = await run_in_threadpool(
-        nlp_service.generate_place_description,
-        request.name,
-        request.address,
-        request.country,
-        request.city
-    )
-    
-    # 3. Save to Cache (Overwrite if is_template)
-    if is_template:
-        cache_entry.result = result
-        db.add(cache_entry)
-        print(f"✅ [Cache Updated] Replaced template with real AI content for: {request.name}")
-    else:
-        new_cache = AIAnalysisCache(
-            place_name=request.name,
-            address=request.address,
-            result=result
-        )
-        db.add(new_cache)
-    
-    db.commit()
-    
-    return schemas.AnalyzeResponse(
-        description=result.get("description", ""),
-        pro_comment=result.get("pro_comment", ""),
-        con_comment=result.get("con_comment", "")
-    )
-
-@app.post("/api/v1/analyze/screenshot", response_model=schemas.ExtractionResponse)
-async def analyze_screenshot(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """
-    接收使用者上傳的單張截圖，透過 Gemini 1.5 Flash 辨識地點，並豐富 Google Places 資訊。
-    """
-    image_data = await file.read()
-    
-    # 0. Upload screenshot to Supabase to get a permanent URL
-    screenshot_url = await run_in_threadpool(image_service.upload_bytes_to_supabase, image_data, file.content_type)
-    final_source_url = screenshot_url if screenshot_url else f"screenshot_{uuid.uuid4().hex[:8]}"
-    
-    # 1. 使用 LLM 解析地點名稱
-    extracted_places = await run_in_threadpool(nlp_service.extract_places_from_image, image_data, file.content_type)
-    
-    if not extracted_places:
-        raise HTTPException(status_code=400, detail="無法從截圖中辨識出任何景點資訊")
-
-    import asyncio
-
-    async def enrich_place_for_screenshot(p):
-        search_name = p.get("search_query", p.get("name", "Unknown"))
-        display_name = p.get("name", "Unknown")
-        inferred_country = p.get("country", "")
-        
-        google_place = await run_in_threadpool(places_service.search_place, f"{inferred_country} {search_name}")
-        if not google_place:
-            google_place = await run_in_threadpool(places_service.search_place, f"{search_name} {p.get('city', '')}")
-        if not google_place:
-            google_place = await run_in_threadpool(places_service.search_place, display_name)
-            
-        ai_fallback_data = None
-        if not google_place:
-            ai_fallback_data = await run_in_threadpool(nlp_service.ai_geocoding, display_name, inferred_country, p.get('city', ''))
-        
-        place_data = {
-            "place_id": f"temp_{random.randint(1000, 9999)}",
-            "name": display_name,
-            "address": None,
-            "latitude": 0.0,
-            "longitude": 0.0,
-            "category": p.get("category", "其他"),
-            "google_place_id": None
-        }
-
-        if google_place:
-            place_data["place_id"] = google_place.get("name", "").split("/")[-1] if "/" in google_place.get("name", "") else google_place.get("id")
-            place_data["google_place_id"] = place_data["place_id"]
-            place_data["address"] = google_place.get("formattedAddress", "")
-            location = google_place.get("location", {})
-            place_data["latitude"] = location.get("latitude", 0.0)
-            place_data["longitude"] = location.get("longitude", 0.0)
-            place_data["rating"] = google_place.get("rating")
-            place_data["user_ratings_total"] = google_place.get("userRatingCount")
-            place_data["opening_hours"] = google_place.get("regularOpeningHours")
-            place_data["open_now"] = google_place.get("currentOpeningHours", {}).get("openNow")
-            if "primaryType" in google_place:
-                place_data["category"] = google_place["primaryType"].replace("_", " ").title()
-        elif ai_fallback_data:
-            place_data["address"] = ai_fallback_data.get("address")
-            place_data["latitude"] = ai_fallback_data.get("latitude", 0.0)
-            place_data["longitude"] = ai_fallback_data.get("longitude", 0.0)
-
-        # 🔵 終極補水方案：如果還是沒圖片，則透過搜尋引擎強行「補照片」
-        if not place_data.get("image_url"):
-            fallback_img = await run_in_threadpool(image_service.fetch_fallback_image, search_name)
-            if fallback_img:
-                place_data["image_url"] = fallback_img
-                # Upload to Supabase for permanent URL
-                permanent_url = await run_in_threadpool(image_service.upload_to_supabase, place_data["image_url"])
-                place_data["image_url"] = permanent_url
-
-        return schemas.ContentPlaceInfo(
-            place=schemas.PlaceBase(**place_data),
-            evidence_text=p.get("evidence_text"),
-            confidence_score=p.get("confidence_score", 0.0)
-        )
-
-    enriched_places = await asyncio.gather(*(enrich_place_for_screenshot(p) for p in extracted_places))
-
-    # 封裝結果
-    content_base = schemas.ContentBase(
-        source_type="screenshot",
-        source_url=final_source_url,
-        title="來自截圖的景點分析",
-        text="",
-        author_name="Me",
-        author_avatar_url=None,
-        preview_thumbnail_url=screenshot_url,
-        published_at=None
-    )
-
-    return schemas.ExtractionResponse(
-        content=content_base,
-        suggested_places=enriched_places
-    )
-
 # --- Curated Posts API ---
 
 @app.get("/api/v1/curated", response_model=List[schemas.CuratedPostResponse])
-async def list_curated_posts(country: Optional[str] = None, db: Session = Depends(get_db)):
+async def list_curated_posts(country: Optional[str] = None, trip_category: Optional[str] = None, db: FirestoreSession = Depends(get_db)):
     """
-    獲取精選 IG 貼文列表 (首頁靈感庫)
+    獲取精選 IG 貼文列表 (首頁靈感庫)，支援國家與行程分類篩選
     """
     query = db.query(CuratedPost)
     if country:
         query = query.filter(CuratedPost.country == country)
-    return query.order_by(CuratedPost.created_at.desc()).all()
+    if trip_category:
+        query = query.filter(CuratedPost.trip_category == trip_category)
+    results = query.all()
+    
+    def get_sort_key(item):
+        val = getattr(item, "created_at", None)
+        if not val:
+            return ""
+        if hasattr(val, "isoformat"):
+            return val.isoformat()
+        return str(val)
+        
+    results.sort(key=get_sort_key, reverse=True)
+    return results
 
-def auto_create_curated_post(content_obj: Content, spots_data: list, db: Session):
+
+def detect_trip_category(title: str, spots_data: list) -> str:
+    """
+    根據貼文標題和景點分類，自動判斷行程類型。
+    分類：shopping / dessert / meal / sightseeing / mixed
+    """
+    title_lower = (title or "").lower()
+    
+    # 關鍵字映射
+    shopping_keywords = ["購物", "逛街", "shopping", "商店", "百貨", "市場", "outlet", "便宜", "折扣", "免稅", "買"]
+    dessert_keywords  = ["甜點", "下午茶", "咖啡", "dessert", "cafe", "甜食", "蛋糕", "冰淇淋", "抹茶", "鬆餅", "布丁", "巧克力", "珍奶", "奶茶", "飲料", "tea"]
+    meal_keywords     = ["美食", "拉麵", "壽司", "燒肉", "居酒屋", "火鍋", "炸物", "串燒", "dinner", "lunch", "餐廳", "食堂", "料理", "吃飯", "吃貨", "麵", "飯", "牛排", "seafood", "海鮮"]
+    sightseeing_keywords = ["景點", "觀光", "寺廟", "神社", "博物館", "公園", "花", "夜景", "古城", "古蹟", "城堡", "瀑布", "海灘", "mountain", "hiking", "溫泉", "花火", "打卡"]
+    
+    def keyword_score(text: str, keywords: list) -> int:
+        return sum(1 for kw in keywords if kw in text)
+    
+    # 也從景點分類分析
+    spot_categories = [str(s.get("category", "")).lower() for s in (spots_data or [])]
+    food_spot_count = sum(1 for c in spot_categories if c in ["food", "meal", "restaurant"])
+    shopping_spot_count = sum(1 for c in spot_categories if c in ["shopping", "mall"])
+    
+    scores = {
+        "shopping":    keyword_score(title_lower, shopping_keywords) + shopping_spot_count * 2,
+        "dessert":     keyword_score(title_lower, dessert_keywords),
+        "meal":        keyword_score(title_lower, meal_keywords) + food_spot_count,
+        "sightseeing": keyword_score(title_lower, sightseeing_keywords),
+    }
+    
+    max_score = max(scores.values())
+    if max_score >= 1:
+        # 取分數最高的分類
+        best = max(scores, key=lambda k: scores[k])
+        return best
+    
+    return "mixed"
+
+
+def auto_create_curated_post(content_obj: Content, spots_data: list, db: FirestoreSession):
     """
     從分析結果自動建立精選貼文 (用於推薦行程首頁)
     新增：阻斷景點數為 0 的無效貼文，並防止網址重複。
@@ -590,29 +752,33 @@ def auto_create_curated_post(content_obj: Content, spots_data: list, db: Session
     nlp_service = NLPService()
     final_country = nlp_service.detect_country(content_obj.title, content_obj.text, spots_data)
     
+    final_category = detect_trip_category(content_obj.title, spots_data)
+    
     if existing_post:
         print(f"🔄 [Curated] Updating existing curated post: {content_obj.title}")
         existing_post.title = content_obj.title
         # 確保使用永久連結
-        existing_post.cover_image = image_service.upload_to_supabase(content_obj.preview_thumbnail_url)
+        existing_post.cover_image = image_service.upload_to_firebase(content_obj.preview_thumbnail_url)
         existing_post.author = content_obj.author_name
         existing_post.spots = spots_data
         existing_post.spot_count = len(spots_data)
         existing_post.country = final_country
+        existing_post.trip_category = final_category
         db.commit()
         db.refresh(existing_post)
         return existing_post
     
-    print(f"🚀 [Curated] Creating new curated post: {content_obj.title}")
+    print(f"🚀 [Curated] Creating new curated post: {content_obj.title} (分類: {final_category})")
     new_curated = CuratedPost(
         id=str(uuid.uuid4()),
         title=content_obj.title,
-        cover_image=image_service.upload_to_supabase(content_obj.preview_thumbnail_url),
+        cover_image=image_service.upload_to_firebase(content_obj.preview_thumbnail_url),
         author=content_obj.author_name,
         source_url=content_obj.source_url,
         spots=spots_data,
         spot_count=len(spots_data),
-        country=final_country
+        country=final_country,
+        trip_category=final_category
     )
     db.add(new_curated)
     db.commit()
@@ -620,23 +786,33 @@ def auto_create_curated_post(content_obj: Content, spots_data: list, db: Session
     return new_curated
 
 @app.post("/api/v1/curated", response_model=schemas.CuratedPostResponse)
-async def create_curated_post(post: schemas.CuratedPostCreate, db: Session = Depends(get_db)):
+async def create_curated_post(post: schemas.CuratedPostCreate, db: FirestoreSession = Depends(get_db)):
     """
     手動新增精選貼文
     """
     import uuid
-    from sqlalchemy.exc import IntegrityError
     
-    # Check if this source_url already exists
-    existing = db.query(CuratedPost).filter(CuratedPost.source_url == post.source_url).first()
+    # Check if this source_url + title already exists, so we don't overwrite user's split posts
+    existing = None
+    if post.source_url and post.source_url.strip() != "" and post.source_url != "null":
+        # We need to fetch all with this url, and find one with the same title
+        all_with_url = db.query(CuratedPost).filter(CuratedPost.source_url == post.source_url).all()
+        for p in all_with_url:
+            if p.title == post.title:
+                existing = p
+                break
+        
     if existing:
         # Update existing post instead of failing
         existing.title = post.title
-        existing.cover_image = await run_in_threadpool(image_service.upload_to_supabase, post.cover_image)
+        existing.cover_image = await run_in_threadpool(image_service.upload_to_firebase, post.cover_image)
         existing.author = post.author
         existing.spots = post.spots
         existing.spot_count = post.spot_count or len(post.spots)
         existing.country = post.country
+        existing.trip_category = detect_trip_category(post.title, post.spots)
+        if post.uploader_id:
+            existing.uploader_id = post.uploader_id
         db.commit()
         db.refresh(existing)
         return existing
@@ -646,27 +822,48 @@ async def create_curated_post(post: schemas.CuratedPostCreate, db: Session = Dep
     if not final_country or final_country == "" or final_country == "韓國":
         final_country = nlp_service.detect_country(post.title, "", post.spots)
 
+    final_category = detect_trip_category(post.title, post.spots)
     new_post = CuratedPost(
         id=str(uuid.uuid4()),
         title=post.title,
-        cover_image=await run_in_threadpool(image_service.upload_to_supabase, post.cover_image),
+        cover_image=await run_in_threadpool(image_service.upload_to_firebase, post.cover_image),
         author=post.author,
         source_url=post.source_url,
         spots=post.spots,
         spot_count=post.spot_count or len(post.spots),
-        country=final_country
+        country=final_country,
+        trip_category=final_category,
+        uploader_id=post.uploader_id
     )
     try:
         db.add(new_post)
         db.commit()
-        db.refresh(new_post)
         return new_post
-    except IntegrityError:
+    except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=409, detail="此貼文已存在於推薦行程中")
+        raise HTTPException(status_code=500, detail=f"建立精選貼文失敗: {str(e)}")
+
+@app.delete("/api/v1/curated/{post_id}")
+async def delete_curated_post(post_id: str, db: FirestoreSession = Depends(get_db)):
+    """
+    刪除精選貼文
+    """
+    post_doc = db.db_client.collection("curated_posts").document(post_id).get()
+    post = CuratedPost(_doc_id=post_doc.id, **post_doc.to_dict()) if post_doc.exists else None
+    
+    if not post:
+        raise HTTPException(status_code=404, detail="Curated post not found")
+    
+    try:
+        db.delete(post)
+        db.commit()
+        return {"status": "success"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/curated/auto", response_model=schemas.CuratedPostResponse)
-async def auto_create_curated_post(request: schemas.ShareRequest, db: Session = Depends(get_db)):
+async def auto_create_curated_post_endpoint(request: schemas.ShareRequest, db: FirestoreSession = Depends(get_db)):
     """
     輸入任何 IG 連結，自動爬取 + 解析 + 存入精選資料庫
     """
@@ -688,7 +885,7 @@ async def auto_create_curated_post(request: schemas.ShareRequest, db: Session = 
     new_post = CuratedPost(
         id=post_id,
         title=title,
-        cover_image=await run_in_threadpool(image_service.upload_to_supabase, info.get("preview_thumbnail_url")),
+        cover_image=await run_in_threadpool(image_service.upload_to_firebase, info.get("preview_thumbnail_url")),
         author=info.get("author_name"),
         source_url=request.url,
         spots=spots,
@@ -697,5 +894,23 @@ async def auto_create_curated_post(request: schemas.ShareRequest, db: Session = 
     )
     db.add(new_post)
     db.commit()
-    db.refresh(new_post)
     return new_post
+
+@app.post("/api/v1/upload/image")
+async def upload_image(file: UploadFile = File(...)):
+    """
+    上傳自訂景點圖片到 Firebase Storage，並回傳永久公開 URL
+    """
+    try:
+        contents = await file.read()
+        content_type = file.content_type or "image/jpeg"
+        
+        # 使用 image_service 上傳二進位資料
+        public_url = await run_in_threadpool(image_service.upload_bytes_to_firebase, contents, content_type)
+        if not public_url:
+            raise HTTPException(status_code=500, detail="上傳圖片到 Firebase Storage 失敗")
+            
+        return {"url": public_url}
+    except Exception as e:
+        print(f"❌ [main.py] upload_image error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

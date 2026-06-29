@@ -73,7 +73,7 @@ struct ShareTripModal: View {
                         }
                         .overlay(alignment: .top) {
                             if showCopyToast {
-                                Text("已複製")
+                                Text("複製成功")
                                     .font(.system(size: 10, weight: .bold))
                                     .foregroundColor(.white)
                                     .padding(.horizontal, 8)
@@ -89,7 +89,7 @@ struct ShareTripModal: View {
                             sendEmail()
                         }
                         
-                        ShareOptionItem(icon: "bubble.left.fill", label: "LINE") {
+                        ShareOptionItem(icon: "LINE_CUSTOM", label: "LINE") {
                             shareToLine()
                         }
                         
@@ -109,8 +109,15 @@ struct ShareTripModal: View {
     }
     
     private func copyInviteLink() {
-        guard let inviteCode = trip?.inviteCode else { return }
-        UIPasteboard.general.string = inviteCode
+        let textToCopy: String
+        if let trip = trip, let inviteCode = trip.inviteCode, !inviteCode.isEmpty {
+            textToCopy = "快來和我一起在 Pubo 規劃「\(trip.title)」！\n點擊跳轉加入：pubo://join?code=\(inviteCode)\n或輸入邀請碼：\(inviteCode)"
+        } else if let trip = trip {
+            textToCopy = "快來和我一起在 Pubo 規劃「\(trip.title)」！"
+        } else {
+            textToCopy = "快來和我一起在 Pubo 規劃行程！"
+        }
+        UIPasteboard.general.string = textToCopy
         withAnimation {
             showCopyToast = true
         }
@@ -122,9 +129,14 @@ struct ShareTripModal: View {
     }
     
     private func sendEmail() {
-        guard let trip = trip, let inviteCode = trip.inviteCode else { return }
+        guard let trip = trip else { return }
         let subject = "快來和我一起在 Pubo 規劃「\(trip.title)」！"
-        let body = "我正在使用 Pubo App 規劃旅行，快點加入我吧！\n\n行程名稱：\(trip.title)\n邀請碼：\(inviteCode)"
+        let body: String
+        if let inviteCode = trip.inviteCode, !inviteCode.isEmpty {
+            body = "我正在使用 Pubo App 規劃旅行，快點加入我吧！\n\n行程名稱：\(trip.title)\n點擊跳轉加入：pubo://join?code=\(inviteCode)\n或輸入邀請碼：\(inviteCode)"
+        } else {
+            body = "我正在使用 Pubo App 規劃旅行，快點加入我吧！\n\n行程名稱：\(trip.title)"
+        }
         let encodedSubject = subject.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         if let url = URL(string: "mailto:?subject=\(encodedSubject)&body=\(encodedBody)") {
@@ -133,21 +145,46 @@ struct ShareTripModal: View {
     }
     
     private func shareToLine() {
-        guard let trip = trip, let inviteCode = trip.inviteCode else { return }
-        let text = "快來和我一起在 Pubo 規劃「\(trip.title)」！\n邀請碼：\(inviteCode)"
+        guard let trip = trip else { return }
+        let text: String
+        if let inviteCode = trip.inviteCode, !inviteCode.isEmpty {
+            text = "快來和我一起在 Pubo 規劃「\(trip.title)」！\n點擊跳轉加入：pubo://join?code=\(inviteCode)\n或輸入邀請碼：\(inviteCode)"
+        } else {
+            text = "快來和我一起在 Pubo 規劃「\(trip.title)」！"
+        }
         let encodedText = text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        if let url = URL(string: "line://msg/text/\(encodedText)") {
-            UIApplication.shared.open(url)
+        
+        let appURL = URL(string: "line://msg/text/\(encodedText)")
+        let webURL = URL(string: "https://line.me/R/msg/text/?\(encodedText)")
+        
+        if let appURL = appURL, UIApplication.shared.canOpenURL(appURL) {
+            UIApplication.shared.open(appURL)
+        } else if let webURL = webURL {
+            UIApplication.shared.open(webURL)
         }
     }
     
     private func showSystemShareSheet() {
-        guard let trip = trip, let inviteCode = trip.inviteCode else { return }
-        let text = "快來和我一起在 Pubo 規劃「\(trip.title)」！\n使用 Pubo App 輸入邀請碼加入：\(inviteCode)"
+        guard let trip = trip else { return }
+        let text: String
+        if let inviteCode = trip.inviteCode, !inviteCode.isEmpty {
+            text = "快來和我一起在 Pubo 規劃「\(trip.title)」！\n點擊跳轉加入：pubo://join?code=\(inviteCode)\n或輸入邀請碼：\(inviteCode)"
+        } else {
+            text = "快來和我一起在 Pubo 規劃「\(trip.title)」！"
+        }
         let av = UIActivityViewController(activityItems: [text], applicationActivities: nil)
         if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
            let rootVC = windowScene.windows.first?.rootViewController {
-            rootVC.present(av, animated: true)
+            var topVC = rootVC
+            while let presentedVC = topVC.presentedViewController {
+                topVC = presentedVC
+            }
+            if let popoverController = av.popoverPresentationController {
+                popoverController.sourceView = topVC.view
+                popoverController.sourceRect = CGRect(x: topVC.view.bounds.midX, y: topVC.view.bounds.midY, width: 0, height: 0)
+                popoverController.permittedArrowDirections = []
+            }
+            topVC.present(av, animated: true)
         }
     }
 }
@@ -192,8 +229,8 @@ struct ActionButton: View {
             .frame(height: 140)
             .background(bgColor)
             .cornerRadius(24)
-            .overlay(RoundedRectangle(cornerRadius: 24).stroke(Color.black, lineWidth: 2))
             .clipped() // Ensure image doesn't bleed out
+            .overlay(RoundedRectangle(cornerRadius: 24).stroke(Color.black, lineWidth: 2))
         }
     }
 }
@@ -206,13 +243,22 @@ struct ShareOptionItem: View {
         Button(action: action) {
             VStack(spacing: 12) {
                 ZStack {
-                    Circle()
-                        .stroke(Color.gray.opacity(0.2), lineWidth: 1)
-                        .frame(width: 60, height: 60)
-                        .background(Circle().fill(Color.white))
-                    Image(systemName: icon)
-                        .font(.system(size: 24))
-                        .foregroundColor(PuboColors.navy)
+                    if icon == "LINE_CUSTOM" {
+                        Text("LINE")
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(width: 60, height: 60)
+                            .background(Color(hex: "06C755")) // Official LINE Green
+                            .clipShape(Circle())
+                    } else {
+                        Circle()
+                            .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                            .frame(width: 60, height: 60)
+                            .background(Circle().fill(Color.white))
+                        Image(systemName: icon)
+                            .font(.system(size: 24))
+                            .foregroundColor(PuboColors.navy)
+                    }
                 }
                 Text(label)
                     .font(.system(size: 12, weight: .bold))

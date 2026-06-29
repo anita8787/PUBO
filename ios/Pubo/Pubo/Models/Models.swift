@@ -144,19 +144,25 @@ struct OpenHours: Codable, Sendable {
     let weekdayDescriptions: [String]?
     
     enum CodingKeys: String, CodingKey {
+        case openNow
         case periods
-        case openNow = "openNow"
-        case weekdayDescriptions = "weekdayDescriptions"
+        case weekdayDescriptions
     }
     
-    init(from decoder: Decoder) throws {
+    nonisolated init(openNow: Bool?, periods: [GooglePeriod]?, weekdayDescriptions: [String]?) {
+        self.openNow = openNow
+        self.periods = periods
+        self.weekdayDescriptions = weekdayDescriptions
+    }
+    
+    nonisolated init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.openNow = try container.decodeIfPresent(Bool.self, forKey: .openNow)
-        self.periods = try container.decodeIfPresent([GooglePeriod].self, forKey: .periods)
-        self.weekdayDescriptions = try container.decodeIfPresent([String].self, forKey: .weekdayDescriptions)
+        openNow = try container.decodeIfPresent(Bool.self, forKey: .openNow)
+        periods = try container.decodeIfPresent([GooglePeriod].self, forKey: .periods)
+        weekdayDescriptions = try container.decodeIfPresent([String].self, forKey: .weekdayDescriptions)
     }
     
-    func encode(to encoder: Encoder) throws {
+    nonisolated func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(openNow, forKey: .openNow)
         try container.encodeIfPresent(periods, forKey: .periods)
@@ -467,6 +473,8 @@ struct CuratedPost: Identifiable, Codable {
     let spots: [PlaceInfo]?
     let spotCount: Int?
     let country: String?
+    let tripCategory: String?  // shopping / dessert / meal / sightseeing / mixed
+    let uploaderId: String?
     let createdAt: Date? // Made optional to fix keyNotFound decoding error
     
     enum CodingKeys: String, CodingKey {
@@ -474,6 +482,8 @@ struct CuratedPost: Identifiable, Codable {
         case coverImageUrl = "cover_image"
         case sourceUrl = "source_url"
         case spotCount = "spot_count"
+        case tripCategory = "trip_category"
+        case uploaderId = "uploader_id"
         case createdAt = "created_at"
     }
 }

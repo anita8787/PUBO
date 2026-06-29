@@ -21,7 +21,7 @@ struct LibraryDetailView: View {
                         Image("Star icon ")
                             .resizable()
                             .frame(width: 20, height: 20)
-                        Text("已收藏了\(content.places.count)個地點")
+                        Text("已收藏了\(content.places.filter { $0.isSaved }.count)個地點")
                             .font(.headline)
                             .foregroundColor(.black)
                     }
@@ -57,6 +57,24 @@ struct LibraryDetailView: View {
                         .frame(width: 120, height: 160)
                         .clipped()
                         .cornerRadius(12)
+                        .overlay(alignment: .bottomTrailing) {
+                            if let sourceUrl = content.sourceUrl, let url = URL(string: sourceUrl) {
+                                Button(action: {
+                                    UIApplication.shared.open(url)
+                                }) {
+                                    ZStack {
+                                        Circle()
+                                            .fill(Color.black.opacity(0.6))
+                                            .frame(width: 28, height: 28)
+                                        Image(systemName: "play.fill")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(.white)
+                                            .offset(x: 1)
+                                    }
+                                }
+                                .padding(8)
+                            }
+                        }
                         
                         // Right: Info
                         VStack(alignment: .leading, spacing: 10) {
@@ -146,13 +164,20 @@ struct LibraryDetailView: View {
                     // 3. Spots List
                     LazyVStack(spacing: 16) {
                         ForEach(content.places) { place in
-                            Button(action: {
-                                NotificationCenter.default.post(name: NSNotification.Name("FocusMapOnPlace"), object: place)
-                                dismiss() // Dismiss LibraryDetailView
-                            }) {
-                                LibraryPlaceRow(place: place)
-                            }
-                            .buttonStyle(.plain)
+                            LibraryPlaceRow(
+                                place: place,
+                                onToggleSave: {
+                                    withAnimation {
+                                        place.isSaved.toggle()
+                                    }
+                                },
+                                onTapContent: {
+                                    if place.isSaved {
+                                        NotificationCenter.default.post(name: NSNotification.Name("FocusMapOnPlace"), object: place)
+                                        dismiss() // Dismiss LibraryDetailView
+                                    }
+                                }
+                            )
                         }
                     }
                     .padding(.horizontal, 24)
@@ -193,61 +218,56 @@ struct LibraryDetailView: View {
 
 struct LibraryPlaceRow: View {
     let place: SDPlace
+    let onToggleSave: () -> Void
+    let onTapContent: () -> Void
     
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
-            // Checkmark (Visual only or interactive?)
-            // Design shows blue checkmark.
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 24))
-                .foregroundColor(Color.blue.opacity(0.8)) // Darker blue
-                .padding(.top, 4)
-            
-            VStack(alignment: .leading, spacing: 6) {
-                Text(place.name)
-                    .font(.headline)
-                    .foregroundColor(.black)
-                
-                if let address = place.address {
-                    Text(address)
-                        .font(.caption)
-                        .foregroundColor(.gray)
-                        .lineLimit(2)
-                }
-                
-                HStack(spacing: 8) {
-                    if let rating = place.rating {
-                        HStack(spacing: 2) {
-                            Image(systemName: "star.fill")
-                                .font(.caption2)
-                                .foregroundColor(PuboColors.yellow)
-                            Text(String(format: "%.1f", rating))
-                                .font(.caption2)
-                                .fontWeight(.bold)
-                            if let count = place.userRatingCount {
-                                Text("(\(count))")
-                                    .font(.caption2)
-                                    .foregroundColor(.gray)
-                            }
-                        }
-                    }
-                    
-                    if place.openNow == true {
-                        Text("營業中")
-                            .font(.caption2)
-                            .foregroundColor(.green)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 2)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.green, lineWidth: 1))
-                    }
-                }
+            // Interactive Checkmark
+            Button(action: onToggleSave) {
+                Image(systemName: place.isSaved ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 24))
+                    .foregroundColor(place.isSaved ? Color.blue.opacity(0.8) : Color.gray.opacity(0.4))
+                    .contentShape(Rectangle())
             }
-            Spacer()
+            .buttonStyle(.plain)
+            .padding(.top, 4)
+            
+            // Spot Information Content
+            Button(action: onTapContent) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(place.name)
+                            .font(.headline)
+                            .foregroundColor(place.isSaved ? .black : .gray)
+                        
+                        if let category = place.category, !category.isEmpty {
+                            Text(category)
+                                .font(.caption)
+                                .foregroundColor(place.isSaved ? .blue : .gray.opacity(0.8))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(place.isSaved ? Color.blue.opacity(0.1) : Color.gray.opacity(0.1))
+                                .cornerRadius(4)
+                        }
+                        
+                        Text((place.address?.isEmpty == false) ? place.address! : "暫無詳細地址")
+                            .font(.caption2)
+                            .lineLimit(2)
+                            .foregroundColor(place.isSaved ? .gray : .gray.opacity(0.6))
+                    }
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!place.isSaved) // Disable navigation tap if the place is unsaved
         }
         .padding(16)
         .background(Color.white)
         .cornerRadius(16)
         .shadow(color: .black.opacity(0.05), radius: 5, y: 2)
+        .opacity(place.isSaved ? 1.0 : 0.6) // Grays out whole row when unchecked
     }
 }
 

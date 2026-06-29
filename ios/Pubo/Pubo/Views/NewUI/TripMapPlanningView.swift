@@ -7,6 +7,24 @@ struct TripMapPlanningView: View {
     let trip: Trip
     @Binding var position: MapCameraPosition
     var spots: [ItinerarySpot]
+    var validCoordinateSpots: [ItinerarySpot] {
+        var valid: [ItinerarySpot] = []
+        for (index, spot) in spots.enumerated() {
+            guard let coord = spot.coordinate, coord.lat != 0.0, coord.long != 0.0 else { continue }
+            
+            // Only include accommodation if it's the very first spot (start of day)
+            // This allows the "Hotel -> Spot 1" line to draw, but prevents any 
+            // "Last Spot -> Hotel" return lines if hotel was duplicated at the end.
+            if spot.category == .accommodation {
+                if index == 0 {
+                    valid.append(spot)
+                }
+            } else {
+                valid.append(spot)
+            }
+        }
+        return valid
+    }
     var allDays: [ItineraryDay]
     var selectedDayIndex: Int
     var onBack: () -> Void
@@ -41,8 +59,9 @@ struct TripMapPlanningView: View {
         case overview, daily
     }
     
-    @State private var routes: [MKRoute] = [] // 真實導航路線條
-    @State private var curvedPaths: [[CLLocationCoordinate2D]] = [] // 曲線備援路徑
+    @State private var routes: [MKRoute?] = [] // 真實導航路線條 (分段儲存)
+    @State private var curvedPaths: [[CLLocationCoordinate2D]?] = [] // 曲線備援路徑 (分段儲存)
+    @State private var routeCalculationId: UUID = UUID() // 用於取消過期的路線計算
 
 
     
@@ -67,9 +86,10 @@ struct TripMapPlanningView: View {
             // === 底部面板 ===
             bottomSheetPanel
                 .zIndex(10)
+            
         }
         .sheet(isPresented: $showSettingsModal) {
-            TripSettingsView(tripId: trip.id)
+            TripSettingsView(isPresented: $showSettingsModal, tripId: trip.id)
         }
         .sheet(isPresented: $showPackingList) {
             PackingListView(tripId: trip.id)
@@ -83,7 +103,7 @@ struct TripMapPlanningView: View {
     private var headerActionButtons: some View {
         HStack(spacing: 12) {
             headerCircleButton(icon: "square.and.arrow.up", action: onShareClick)
-            headerCircleButton(icon: "gearshape", action: { showSettingsModal = true })
+            headerCircleButton(icon: "gearshape", action: { withAnimation { showSettingsModal = true } })
         }
     }
     
@@ -91,81 +111,74 @@ struct TripMapPlanningView: View {
     // MARK: - 地圖圖層
     private var mapLayer: some View {
         Map(position: $position, selection: $selectedSpotId) { 
-            ForEach(Array(spots.enumerated()), id: \.offset) { index, spot in
+            ForEach(Array(spots.enumerated()), id: \.element.id) { index, spot in
                 if let coord = spot.coordinate {
                     Annotation(spot.name, coordinate: CLLocationCoordinate2D(
                         latitude: coord.lat,
                         longitude: coord.long
-                    ), anchor: .bottom) {
-                        mapMarker(for: spot, index: index)
+                    ), anchor: .init(x: 0.5, y: 0.92)) { // 修正大頭針與線段縫隙 Bug
+                        mapMarker(for: spot)
                     }
                     .tag(spot.id)
                 }
             }
             
-            // 路線圖 (Real Road Routes)
-            if !routes.isEmpty {
-                ForEach(routes, id: \.self) { route in
+            // 路線與備援曲線分段繪製
+            ForEach(0..<max(0, validCoordinateSpots.count - 1), id: \.self) { i in
+                if i < routes.count, let route = routes[i] {
                     MapPolyline(route)
-                        .stroke(Color.red.opacity(0.8), lineWidth: 5)
-                }
-            }
-            
-            // 曲線或直線備援 (Curved Fallbacks)
-            // 如果主要道路載入失敗 (如韓國地區)，則顯示優美的曲線
-            if !curvedPaths.isEmpty {
-                ForEach(Array(curvedPaths.enumerated()), id: \.offset) { _, path in
+                        .stroke(PuboColors.red, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
+                } else if i < curvedPaths.count, let path = curvedPaths[i] {
                     MapPolyline(coordinates: path)
-                        .stroke(
-                            LinearGradient(
-                                colors: [Color.red, Color.red.opacity(0.5)],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            ),
-                            lineWidth: 3
-                        )
+                        .stroke(PuboColors.red, style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
                 }
-            } else if routes.isEmpty && spots.count >= 2 {
-                // 如果連曲線都還沒算好，暫時用直線
-                MapPolyline(coordinates: spots.compactMap { spot in
-                    if let coord = spot.coordinate {
-                        return CLLocationCoordinate2D(latitude: coord.lat, longitude: coord.long)
-                    }
-                    return nil
-                })
-                .stroke(Color.red.opacity(0.5), lineWidth: 2)
             }
         }
         .mapStyle(.standard(elevation: .realistic))
         .ignoresSafeArea()
+        .onChange(of: selectedSpotId) { _, newId in
+            if let newId = newId, let spot = spots.first(where: { $0.id == newId }) {
+                focusOnSpot(spot)
+            }
+        }
         .onAppear {
             updateMapToFitSpots()
             calculateRoutes()
         }
-        .onChange(of: selectedDayIndex) { _, _ in
-            updateMapToFitSpots()
-            calculateRoutes()
-        }
-        .onChange(of: spots.count) { _, _ in
+        .onChange(of: spots.map { "\($0.id)-\($0.latitude ?? 0.0)-\($0.longitude ?? 0.0)-\($0.travelMode?.rawValue ?? "")" }) { _, _ in
             updateMapToFitSpots()
             calculateRoutes()
         }
     }
     
     private func calculateRoutes() {
-        guard spots.count >= 2 else {
-            self.routes = []
-            return
-        }
+        let validSpots = validCoordinateSpots
+        
+        // 立即產生新的計算批次 ID，讓任何正在進行中的舊 Task 的結果失效
+        let batchId = UUID()
+        routeCalculationId = batchId
+        
+        // 立即重設，防止切換日期時殘留舊連線
+        let segmentCount = max(0, validSpots.count - 1)
+        self.routes = Array(repeating: nil, count: segmentCount)
+        self.curvedPaths = Array(repeating: nil, count: segmentCount)
+        
+        guard validSpots.count >= 2 else { return }
+        
+        // 立即先產生曲線備援路徑，讓線段馬上出現（不需等待 MKDirections）
+        generateCurvedFallbacksFor(validSpots)
+        
+        let spotsCopy = validSpots // 本地複製，防止多執行緒存取衝突
         
         Task {
-            var newRoutes: [MKRoute] = []
-            
-            for i in 0..<(spots.count - 1) {
-                guard let startCoord = spots[i].coordinate,
-                      let endCoord = spots[i+1].coordinate else { continue }
+            for i in 0..<(spotsCopy.count - 1) {
+                // 如果批次 ID 已過期（有新的計算開始），立即中止
+                guard routeCalculationId == batchId else { return }
                 
-                // Skip invalid 0,0
+                guard let startCoord = spotsCopy[i].coordinate,
+                      let endCoord = spotsCopy[i+1].coordinate else { continue }
+                
+                // 略過無效 0,0 座標
                 if startCoord.lat == 0 || endCoord.lat == 0 { continue }
                 
                 let startLocation = CLLocation(latitude: startCoord.lat, longitude: startCoord.long)
@@ -178,80 +191,95 @@ struct TripMapPlanningView: View {
                 request.source = MKMapItem(placemark: startPlacemark)
                 request.destination = MKMapItem(placemark: endPlacemark)
                 
-                // Determine transport type based on spot preference or default to automobile
-                switch spots[i].travelMode {
+                switch spotsCopy[i].travelMode {
                 case .walk: request.transportType = .walking
-                default: request.transportType = .automobile // Apple directions only support auto/walking/transit/any
+                default: request.transportType = .automobile
                 }
                 
                 let directions = MKDirections(request: request)
                 do {
                     let response = try await directions.calculate()
                     if let route = response.routes.first {
-                        newRoutes.append(route)
+                        await MainActor.run {
+                            // 只有在此批次 ID 仍然有效時才更新
+                            guard self.routeCalculationId == batchId,
+                                  i < self.routes.count else { return }
+                            self.routes[i] = route
+                            // 有了真實路線，清除此段的備援曲線
+                            if i < self.curvedPaths.count {
+                                self.curvedPaths[i] = nil
+                            }
+                        }
                     }
                 } catch {
                     print("❌ Error fetching route for segment \(i): \(error)")
+                    // MKDirections 失敗時，曲線備援路徑已存在，不需要額外動作
                 }
-            }
-            
-            await MainActor.run {
-                self.routes = newRoutes
-                // 如果道路抓取不全，則為剩餘段落生成「曲線」
-                self.generateCurvedFallbacks()
             }
         }
     }
     
-    /// 生成優美的二次貝茲曲線坐標點，作為直線的替代方案
-    private func generateCurvedFallbacks() {
-        guard spots.count >= 2 else {
-            self.curvedPaths = []
-            return
-        }
+    /// 立即為所有路段生成貝茲曲線備援路徑（在 MKDirections 計算完成前讓線段先顯示）
+    private func generateCurvedFallbacksFor(_ validSpots: [ItinerarySpot]) {
+        var paths: [[CLLocationCoordinate2D]?] = Array(repeating: nil, count: max(0, validSpots.count - 1))
         
-        var paths: [[CLLocationCoordinate2D]] = []
-        
-        for i in 0..<(spots.count - 1) {
-            guard let start = spots[i].coordinate,
-                  let end = spots[i+1].coordinate else { continue }
+        for i in 0..<(validSpots.count - 1) {
+            guard let start = validSpots[i].coordinate,
+                  let end = validSpots[i+1].coordinate else { continue }
             
-            // 如果這一段已經有實景道路模型了，就跳過不畫曲線
-            // (簡單判定：如果 routes 數量跟 index 對得上則跳過，但為了保險起見，
-            //  在韓國等地區通常 routes 會是空的，所以這裡會全部畫出優點曲線)
-            if routes.count > i { continue }
+            if start.lat == 0 || end.lat == 0 { continue }
             
-            let p0 = CLLocationCoordinate2D(latitude: start.lat, longitude: start.long)
-            let p2 = CLLocationCoordinate2D(latitude: end.lat, longitude: end.long)
-            
-            // 計算控制點 P1 (取中點並向垂直方向偏移)
-            let midLat = (p0.latitude + p2.latitude) / 2
-            let midLon = (p0.longitude + p2.longitude) / 2
-            
-            // 偏移量：根據距離調整，避免太灣或太直
-            let latDiff = p2.latitude - p0.latitude
-            let lonDiff = p2.longitude - p0.longitude
-            let offset: Double = 0.15 
-            
-            // 垂直向量 (-dy, dx)
-            let controlP1 = CLLocationCoordinate2D(
-                latitude: midLat - lonDiff * offset,
-                longitude: midLon + latDiff * offset
+            paths[i] = makeCurvedPath(
+                from: CLLocationCoordinate2D(latitude: start.lat, longitude: start.long),
+                to: CLLocationCoordinate2D(latitude: end.lat, longitude: end.long)
             )
-            
-            // 生成 50 個點構成平滑曲線
-            var curvePoints: [CLLocationCoordinate2D] = []
-            let segments = 30
-            for t_idx in 0...segments {
-                let t = Double(t_idx) / Double(segments)
-                let lat = pow(1-t, 2) * p0.latitude + 2 * (1-t) * t * controlP1.latitude + pow(t, 2) * p2.latitude
-                let lon = pow(1-t, 2) * p0.longitude + 2 * (1-t) * t * controlP1.longitude + pow(t, 2) * p2.longitude
-                curvePoints.append(CLLocationCoordinate2D(latitude: lat, longitude: lon))
-            }
-            paths.append(curvePoints)
         }
         
         self.curvedPaths = paths
+    }
+    
+    /// 生成優美的二次貝茲曲線坐標點（僅為尚未有真實路線的路段生成備援）
+    private func generateCurvedFallbacks() {
+        let validSpots = validCoordinateSpots
+        var paths: [[CLLocationCoordinate2D]?] = Array(repeating: nil, count: max(0, validSpots.count - 1))
+        
+        for i in 0..<(validSpots.count - 1) {
+            // 如果這一段已經有實景道路模型了，就跳過不畫曲線
+            if i < routes.count, routes[i] != nil {
+                continue
+            }
+            
+            guard let start = validSpots[i].coordinate,
+                  let end = validSpots[i+1].coordinate else { continue }
+            
+            paths[i] = makeCurvedPath(
+                from: CLLocationCoordinate2D(latitude: start.lat, longitude: start.long),
+                to: CLLocationCoordinate2D(latitude: end.lat, longitude: end.long)
+            )
+        }
+        
+        self.curvedPaths = paths
+    }
+    
+    private func makeCurvedPath(from p0: CLLocationCoordinate2D, to p2: CLLocationCoordinate2D) -> [CLLocationCoordinate2D] {
+        let midLat = (p0.latitude + p2.latitude) / 2
+        let midLon = (p0.longitude + p2.longitude) / 2
+        let latDiff = p2.latitude - p0.latitude
+        let lonDiff = p2.longitude - p0.longitude
+        let offset: Double = 0.15
+        let controlP1 = CLLocationCoordinate2D(
+            latitude: midLat - lonDiff * offset,
+            longitude: midLon + latDiff * offset
+        )
+        var curvePoints: [CLLocationCoordinate2D] = []
+        let segments = 30
+        for t_idx in 0...segments {
+            let t = Double(t_idx) / Double(segments)
+            let lat = pow(1-t, 2) * p0.latitude + 2 * (1-t) * t * controlP1.latitude + pow(t, 2) * p2.latitude
+            let lon = pow(1-t, 2) * p0.longitude + 2 * (1-t) * t * controlP1.longitude + pow(t, 2) * p2.longitude
+            curvePoints.append(CLLocationCoordinate2D(latitude: lat, longitude: lon))
+        }
+        return curvePoints
     }
     
     private func updateMapToFitSpots() {
@@ -327,8 +355,9 @@ struct TripMapPlanningView: View {
     
     // MARK: - 地圖標記
     @ViewBuilder
-    private func mapMarker(for spot: ItinerarySpot, index: Int) -> some View {
+    private func mapMarker(for spot: ItinerarySpot) -> some View {
         let isSelected = selectedSpotId == spot.id
+        let spotNum = getSpotNumber(for: spot)
         
         // Visual Marker
         ZStack(alignment: .center) {
@@ -338,13 +367,31 @@ struct TripMapPlanningView: View {
                 .frame(width: 60, height: 60)
                 .shadow(color: .black.opacity(0.15), radius: 3, y: 2)
             
-            Text("\(index + 1)")
-                .font(.system(size: 16, weight: .black))
-                .foregroundColor(isSelected ? Color.blue : PuboColors.navy)
-                .offset(y: -6)
+            if spotNum.isEmpty {
+                Image(systemName: "house.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(isSelected ? Color.blue : PuboColors.navy)
+                    .offset(y: -6)
+            } else {
+                Text(spotNum)
+                    .font(.system(size: 16, weight: .black))
+                    .foregroundColor(isSelected ? Color.blue : PuboColors.navy)
+                    .offset(y: -6)
+            }
         }
         .scaleEffect(isSelected ? 1.3 : 1.0)
         .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isSelected)
+    }
+    
+    private func getSpotNumber(for spot: ItinerarySpot) -> String {
+        if spot.category == .accommodation {
+            return ""
+        }
+        let regularSpots = spots.filter { $0.category != .accommodation }
+        if let idx = regularSpots.firstIndex(where: { $0.id == spot.id }) {
+            return "\(idx + 1)"
+        }
+        return ""
     }
     
     private func categoryIcon(for category: SpotCategory?) -> Image {
@@ -372,16 +419,16 @@ struct TripMapPlanningView: View {
     private func headerCircleButton(icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(size: 18, weight: .bold))
                 .foregroundColor(.black)
                 .frame(width: 40, height: 40)
                 .background(Color.white)
                 .clipShape(Circle())
-                .overlay(Circle().stroke(Color.black, lineWidth: 2))
+                .overlay(Circle().stroke(Color.black, lineWidth: 1.8))
                 .background(
                     Circle()
                         .fill(Color.black.opacity(0.15))
-                        .offset(x: 2.5, y: 2.5)
+                        .offset(x: 2.0, y: 2.0)
                 )
         }
     }
@@ -410,6 +457,51 @@ struct TripMapPlanningView: View {
         .animation(.interactiveSpring(), value: dragOffset)
     }
     
+    private var sheetDragGesture: some Gesture {
+        DragGesture()
+            .onChanged { value in
+                // Limit dragging upwards beyond high or downwards beyond low
+                let drag = value.translation.height
+                let newHeight = sheetMode.height - drag
+                
+                if newHeight > SheetMode.high.height {
+                    dragOffset = drag + (newHeight - SheetMode.high.height) * 0.9 // Resistance
+                } else if newHeight < SheetMode.low.height {
+                    dragOffset = drag + (newHeight - SheetMode.low.height) * 0.9 // Resistance
+                } else {
+                    dragOffset = drag
+                }
+            }
+            .onEnded { value in
+                let velocity = value.velocity.height
+                let drag = value.translation.height
+                let newHeight = sheetMode.height - drag
+                
+                withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) {
+                    dragOffset = 0
+                    
+                    // Use velocity to flick, or snap to nearest
+                    if velocity > 500 { // Flicked down
+                        if sheetMode == .high { sheetMode = .medium }
+                        else { sheetMode = .low }
+                    } else if velocity < -500 { // Flicked up
+                        if sheetMode == .low { sheetMode = .medium }
+                        else { sheetMode = .high }
+                    } else {
+                        // Snap to nearest
+                        let distances = [
+                            (SheetMode.low, abs(newHeight - SheetMode.low.height)),
+                            (SheetMode.medium, abs(newHeight - SheetMode.medium.height)),
+                            (SheetMode.high, abs(newHeight - SheetMode.high.height))
+                        ]
+                        if let nearest = distances.min(by: { $0.1 < $1.1 }) {
+                            sheetMode = nearest.0
+                        }
+                    }
+                }
+            }
+    }
+    
     // MARK: - 拖曳把手
     private var dragHandle: some View {
         VStack {
@@ -422,50 +514,7 @@ struct TripMapPlanningView: View {
         .frame(height: 32)
         .frame(maxWidth: .infinity)
         .contentShape(Rectangle())
-        .gesture(
-            DragGesture()
-                .onChanged { value in
-                    // Limit dragging upwards beyond high or downwards beyond low
-                    let drag = value.translation.height
-                    let newHeight = sheetMode.height - drag
-                    
-                    if newHeight > SheetMode.high.height {
-                        dragOffset = drag + (newHeight - SheetMode.high.height) * 0.9 // Resistance
-                    } else if newHeight < SheetMode.low.height {
-                        dragOffset = drag + (newHeight - SheetMode.low.height) * 0.9 // Resistance
-                    } else {
-                        dragOffset = drag
-                    }
-                }
-                .onEnded { value in
-                    let velocity = value.velocity.height
-                    let drag = value.translation.height
-                    let newHeight = sheetMode.height - drag
-                    
-                    withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) {
-                        dragOffset = 0
-                        
-                        // Use velocity to flick, or snap to nearest
-                        if velocity > 500 { // Flicked down
-                            if sheetMode == .high { sheetMode = .medium }
-                            else { sheetMode = .low }
-                        } else if velocity < -500 { // Flicked up
-                            if sheetMode == .low { sheetMode = .medium }
-                            else { sheetMode = .high }
-                        } else {
-                            // Snap to nearest
-                            let distances = [
-                                (SheetMode.low, abs(newHeight - SheetMode.low.height)),
-                                (SheetMode.medium, abs(newHeight - SheetMode.medium.height)),
-                                (SheetMode.high, abs(newHeight - SheetMode.high.height))
-                            ]
-                            if let nearest = distances.min(by: { $0.1 < $1.1 }) {
-                                sheetMode = nearest.0
-                            }
-                        }
-                    }
-                }
-        )
+        .gesture(sheetDragGesture)
     }
     
     // MARK: - 日期選擇器
@@ -555,14 +604,15 @@ struct TripMapPlanningView: View {
     
     // MARK: - 精簡模式輪播 (Concise Mode)
     private var conciseSpotCarousel: some View {
-        TabView {
-            ForEach(Array(spots.enumerated()), id: \.offset) { index, spot in
+        TabView(selection: $selectedSpotId) {
+            ForEach(Array(spots.enumerated()), id: \.element.id) { index, spot in
                 conciseSpotCard(spot: spot, index: index)
-                    .tag(index)
+                    .tag(spot.id as String?)
             }
         }
         .tabViewStyle(.page(indexDisplayMode: .never))
         .frame(height: 190)
+        .simultaneousGesture(sheetDragGesture)
     }
     
     private func conciseSpotCard(spot: ItinerarySpot, index: Int) -> some View {
@@ -570,7 +620,8 @@ struct TripMapPlanningView: View {
             // 頂部資訊區 (圖 + 文)
             HStack(alignment: .top, spacing: 16) {
                 // 圖片
-                AsyncImage(url: URL(string: spot.image)) { img in
+                let displayUrl = (!spot.image.isEmpty) ? spot.image : (trip.coverImageUrl ?? "")
+                CachedAsyncImage(url: URL(string: displayUrl)) { img in
                     img.resizable().aspectRatio(contentMode: .fill)
                 } placeholder: {
                     RoundedRectangle(cornerRadius: 16).fill(Color.gray.opacity(0.15))
@@ -587,7 +638,9 @@ struct TripMapPlanningView: View {
                         .textCase(.uppercase)
                         .tracking(1)
                     
-                    Text(verbatim: "\(index + 1). \(spot.name)")
+                    let spotNum = getSpotNumber(for: spot)
+                    let titleText = spotNum.isEmpty ? spot.name : "\(spotNum). \(spot.name)"
+                    Text(verbatim: titleText)
                         .font(.system(size: 22, weight: .black))
                         .foregroundColor(.black)
                         .lineLimit(1)
@@ -636,9 +689,16 @@ struct TripMapPlanningView: View {
                         .frame(width: 28, height: 28)
                         .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
                     
-                    Text("\(index + 1)")
-                        .font(.system(size: 12, weight: .black))
-                        .foregroundColor(.white)
+                    let spotNum = getSpotNumber(for: spot)
+                    if spotNum.isEmpty {
+                        Image(systemName: "house.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(.white)
+                    } else {
+                        Text(spotNum)
+                            .font(.system(size: 12, weight: .black))
+                            .foregroundColor(.white)
+                    }
                 }
                 .overlay(Circle().stroke(PuboColors.navy, lineWidth: 1.5))
                 .padding(.horizontal, 16)
@@ -693,16 +753,36 @@ struct TripMapPlanningView: View {
                 .textCase(.uppercase)
             
             VStack(alignment: .leading, spacing: 10) {
-                ForEach(Array(allDays.prefix(isOverviewExpanded ? allDays.count : 2).enumerated()), id: \.offset) { idx, day in
-                    HStack(spacing: 8) {
-                        Text(verbatim: "\(day.mapTabDateString) >")
-                            .font(.system(size: 11, weight: .black))
-                            .foregroundColor(PuboColors.navy)
-                        
-                        Text(day.spots.isEmpty ? "尚未安排" : day.spots.map { $0.name }.joined(separator: " - "))
-                            .font(.system(size: 11, weight: .black))
-                            .foregroundColor(.gray.opacity(0.5))
-                            .lineLimit(1)
+                ForEach(Array(allDays.enumerated()), id: \.offset) { idx, day in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .top, spacing: 8) {
+                            Text(verbatim: "\(day.mapTabDateString) >")
+                                .font(.system(size: 11, weight: .black))
+                                .foregroundColor(PuboColors.navy)
+                                .fixedSize()
+                            
+                            if day.spots.isEmpty {
+                                Text("尚未安排")
+                                    .font(.system(size: 11, weight: .black))
+                                    .foregroundColor(.gray.opacity(0.5))
+                            } else {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    let displaySpots = Array(day.spots.prefix(isOverviewExpanded ? day.spots.count : 3))
+                                    ForEach(Array(displaySpots.enumerated()), id: \.offset) { spotIdx, spot in
+                                        Text(verbatim: "\(spotIdx + 1). \(spot.name)")
+                                            .font(.system(size: 11, weight: .black))
+                                            .foregroundColor(.gray.opacity(0.5))
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                    if !isOverviewExpanded && day.spots.count > 3 {
+                                        Text("...")
+                                            .font(.system(size: 11, weight: .black))
+                                            .foregroundColor(.gray.opacity(0.5))
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -820,7 +900,7 @@ struct TripMapPlanningView: View {
     // MARK: - 每日景點列表
     private var dailySpotListContent: some View {
         VStack(spacing: 0) {
-            ForEach(Array(spots.enumerated()), id: \.offset) { index, spot in
+            ForEach(Array(spots.enumerated()), id: \.element.id) { index, spot in
                 VStack(spacing: 0) {
                     spotRow(spot: spot, index: index)
                     
@@ -877,10 +957,11 @@ struct TripMapPlanningView: View {
         }) {
             HStack(alignment: .center, spacing: 14) {
                 // 景點圖片
-                AsyncImage(url: URL(string: spot.image)) { img in
+                let displayUrl = (!spot.image.isEmpty) ? spot.image : (trip.coverImageUrl ?? "")
+                CachedAsyncImage(url: URL(string: displayUrl)) { img in
                     img.resizable().aspectRatio(contentMode: .fill)
                 } placeholder: {
-                    RoundedRectangle(cornerRadius: 12).fill(Color.gray.opacity(0.15))
+                    RoundedRectangle(cornerRadius: 16).fill(Color.gray.opacity(0.15))
                 }
                 .frame(width: 64, height: 64)
                 .cornerRadius(12)
@@ -894,7 +975,9 @@ struct TripMapPlanningView: View {
                         .tracking(2)
                         .textCase(.uppercase)
                     
-                    Text(verbatim: "\(index + 1). \(spot.name)")
+                    let spotNum = getSpotNumber(for: spot)
+                    let titleText = spotNum.isEmpty ? spot.name : "\(spotNum). \(spot.name)"
+                    Text(verbatim: titleText)
                         .font(.system(size: 17, weight: .bold))
                         .foregroundColor(.black)
                         .lineLimit(1)
@@ -969,7 +1052,7 @@ struct TripMapPlanningView: View {
             
             Spacer()
         }
-        .background(Color(hex: "FFF9E1"))
+        .background(PuboColors.beige)
         .cornerRadius(12, corners: [.topRight, .bottomRight])
         .padding(.leading, 42)
         .padding(.trailing, 8)

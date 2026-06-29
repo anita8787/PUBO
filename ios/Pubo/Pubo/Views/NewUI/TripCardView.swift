@@ -84,9 +84,9 @@ struct TripCardView: View {
                     }) {
                         ZStack {
                             Image(systemName: "square.and.arrow.up")
-                                .font(.system(size: 16))
+                                .font(.system(size: 18))
                                 .foregroundColor(.black)
-                                .frame(width: 36, height: 36)
+                                .frame(width: 40, height: 40)
                                 .background(Color.white)
                                 .clipShape(Circle())
                                 .overlay(Circle().stroke(Color.black, lineWidth: 1.5))

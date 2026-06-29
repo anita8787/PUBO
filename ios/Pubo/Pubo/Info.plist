@@ -15,22 +15,26 @@
 			</array>
 		</dict>
 	</array>
-    <key>NSAppTransportSecurity</key>
-    <dict>
-        <key>NSAllowsArbitraryLoads</key>
-        <true/>
-    </dict>
-    <key>NSPhotoLibraryAddUsageDescription</key>
-    <string>需要權限以儲存行程長圖至相簿</string>
-    <key>UIUserInterfaceStyle</key>
-    <string>Light</string>
-    <key>NSLocationWhenInUseUsageDescription</key>
-    <string>Pubo 需要您的位置來偵測您所在的城市，以提供當地天氣與推薦景點。</string>
-    <key>LSApplicationQueriesSchemes</key>
-    <array>
-        <string>comgooglemaps</string>
-        <string>googlemaps</string>
-        <string>nmap</string>
-    </array>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>comgooglemaps</string>
+		<string>googlemaps</string>
+		<string>nmap</string>
+	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>我們需要存取區域網路，以連線至本機開發伺服器進行貼文分析。</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Pubo 需要您的位置來偵測您所在的城市，以提供當地天氣與推薦景點。</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>需要權限以儲存行程長圖至相簿</string>
+	<key>UIUserInterfaceStyle</key>
+	<string>Light</string>
 </dict>
 </plist>

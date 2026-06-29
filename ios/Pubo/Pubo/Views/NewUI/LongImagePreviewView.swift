@@ -64,9 +64,9 @@ struct LongImagePreviewView: View {
                 HStack {
                     Button(action: { dismiss() }) {
                         Image(systemName: "chevron.left")
-                            .font(.system(size: 20, weight: .bold))
+                            .font(.system(size: 18, weight: .bold))
                             .foregroundColor(.black)
-                            .frame(width: 44, height: 44)
+                            .frame(width: 40, height: 40)
                             .background(Color.white)
                             .clipShape(Circle())
                             .overlay(Circle().stroke(Color.black, lineWidth: 2))
@@ -123,6 +123,7 @@ struct LongImagePreviewView: View {
                         showDownloadActionSheet = true
                     }
                 }
+                .padding(.top, 16)
                 .padding(.bottom, 24)
             }
             
@@ -465,43 +466,32 @@ struct ItineraryPlanView: View {
                                         
                                         // Row 2: Timeline & Spots
                                         HStack(alignment: .top, spacing: 16) {
-                                            // Timeline Line (Centered under Day Tag approx width)
-                                            // Day Tag width ~ 60?
-                                            // Let's assume line is indented
-                                            Rectangle() // Dotted Line simulation
-                                                .fill(Color.clear)
-                                                .frame(width: 1)
-                                                .overlay(
-                                                    Rectangle()
-                                                        .stroke(style: StrokeStyle(lineWidth: 1, dash: [4]))
-                                                        .foregroundColor(Color.gray.opacity(0.3))
-                                                )
-                                                .padding(.leading, 24) // Indent to align with pill center approx
-                                            
-                                            // Spots List
+                                            // Spots List with embedded Timeline
                                             VStack(alignment: .leading, spacing: 12) {
                                                 if day.spots.isEmpty {
-                                                    Text("尚未安排行程")
-                                                        .font(.system(size: 12))
-                                                        .foregroundColor(.gray.opacity(0.4))
+                                                    HStack(alignment: .top, spacing: 12) {
+                                                        Text("--:--")
+                                                            .font(.system(size: 11, weight: .bold))
+                                                            .foregroundColor(.clear)
+                                                            .frame(width: 36, alignment: .trailing)
+                                                        Text("尚未安排行程")
+                                                            .font(.system(size: 12))
+                                                            .foregroundColor(.gray.opacity(0.4))
+                                                    }
                                                 } else {
                                                     ForEach(day.spots) { spot in
-                                                        HStack(alignment: .bottom, spacing: 6) {
-                                                            Text(spot.name)
-                                                                .font(.system(size: 13, weight: .bold)) // Reduced to 13pt
-                                                                .foregroundColor(PuboColors.navy)
-                                                            
-                                                            // Logic to show ONLY duration (minutes/hours) and ignore "Opening Hours"
-                                                            let durationText = getStayDuration(spot)
-                                                            if !durationText.isEmpty {
-                                                                Text(durationText)
-                                                                    .font(.system(size: 11))
-                                                                    .foregroundColor(.gray)
-                                                            }
-                                                        }
+                                                        LongImageSpotRow(spot: spot)
                                                     }
                                                 }
                                             }
+                                            .background(
+                                                Rectangle()
+                                                    .stroke(style: StrokeStyle(lineWidth: 1, dash: [4]))
+                                                    .foregroundColor(Color.gray.opacity(0.3))
+                                                    .frame(width: 1)
+                                                    .padding(.leading, 42),
+                                                alignment: .leading
+                                            )
                                             
                                             Spacer()
                                         }
@@ -520,11 +510,11 @@ struct ItineraryPlanView: View {
                             .padding(.bottom, 32)
                         }
                     }
-                    .background(Color(hex: "FFF9E1")) // Card Background (Cream/Beige)
-                    .cornerRadius(40)
+                    .background(PuboColors.beige) // Card Background (Cream/Beige)
+                    .clipShape(RoundedRectangle(cornerRadius: 40))
                     .overlay(
                         RoundedRectangle(cornerRadius: 40)
-                            .stroke(Color.black, lineWidth: 3)
+                            .strokeBorder(Color.black, lineWidth: 2.5)
                     )
                 }
                 .frame(width: ScreenUtils.width * 0.8)
@@ -546,6 +536,57 @@ struct ItineraryPlanView: View {
             return sub
         }
         // Fallback to duration if it's NOT opening hours
+        if !spot.duration.contains("營業") && (spot.duration.contains("分") || spot.duration.contains("時")) {
+            return spot.duration
+        }
+        return "" 
+    }
+}
+
+// 獨立的單筆景點卡片，減輕編譯器解析負擔
+struct LongImageSpotRow: View {
+    let spot: ItinerarySpot
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(spot.time)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.gray)
+                .frame(width: 36, alignment: .trailing)
+                .padding(.top, 2)
+                
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .bottom, spacing: 6) {
+                    Text(spot.name.replacingOccurrences(of: "+", with: " "))
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(PuboColors.navy)
+                    
+                    let durationText = getStayDuration(spot)
+                    if !durationText.isEmpty {
+                        Text(durationText)
+                            .font(.system(size: 11))
+                            .foregroundColor(.gray)
+                    }
+                }
+                
+                if let notes = spot.notes, !notes.isEmpty {
+                    Text(notes.joined(separator: "\n"))
+                        .font(.system(size: 11))
+                        .foregroundColor(Color.black.opacity(0.8))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Color(hex: "FFF9C4")) // 淺黃色備忘錄底色
+                        .cornerRadius(6)
+                        .padding(.top, 4)
+                }
+            }
+        }
+    }
+    
+    func getStayDuration(_ spot: ItinerarySpot) -> String {
+        if let sub = spot.subLabel, (sub.contains("分") || sub.contains("時")) {
+            return sub
+        }
         if !spot.duration.contains("營業") && (spot.duration.contains("分") || spot.duration.contains("時")) {
             return spot.duration
         }
@@ -614,7 +655,7 @@ struct RouteMapView: View {
                                     let coordinates = allSpots.compactMap { $0.coordinate.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.long) } }
                                     if !coordinates.isEmpty {
                                         MapPolyline(coordinates: coordinates)
-                                            .stroke(PuboColors.navy, lineWidth: 3)
+                                            .stroke(PuboColors.navy, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
                                     }
                                     
                                     ForEach(Array(allSpots.enumerated()), id: \.offset) { index, spot in
@@ -648,9 +689,9 @@ struct RouteMapView: View {
                             .padding(.bottom, 32)
                         }
                     }
-                    .background(Color(hex: "FFF9E1"))
-                    .cornerRadius(40)
-                    .overlay(RoundedRectangle(cornerRadius: 40).stroke(Color.black, lineWidth: 3))
+                    .background(PuboColors.beige)
+                    .clipShape(RoundedRectangle(cornerRadius: 40))
+                    .overlay(RoundedRectangle(cornerRadius: 40).strokeBorder(Color.black, lineWidth: 2.5))
                 }
                 .frame(width: ScreenUtils.width * 0.8)
                 .shadow(color: .black.opacity(0.1), radius: 20, y: 10)
@@ -749,9 +790,9 @@ struct LuggageListView: View {
                             .padding(.bottom, 32)
                         }
                     }
-                    .background(Color(hex: "FFF9E1"))
-                    .cornerRadius(40)
-                    .overlay(RoundedRectangle(cornerRadius: 40).stroke(Color.black, lineWidth: 3))
+                    .background(PuboColors.beige)
+                    .clipShape(RoundedRectangle(cornerRadius: 40))
+                    .overlay(RoundedRectangle(cornerRadius: 40).strokeBorder(Color.black, lineWidth: 2.5))
                 }
                 .frame(width: ScreenUtils.width * 0.8)
                 .shadow(color: .black.opacity(0.1), radius: 20, y: 10)

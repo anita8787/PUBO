@@ -4,51 +4,61 @@ import UniformTypeIdentifiers
 
 struct PuboTextPackager {
     
-    /// 將行程資料轉為帶有 HTML 超連結的字串，並直接存入系統剪貼簿 (支援富文本)
-    static func copyNotesToPasteboard(tripTitle: String, spots: [ItinerarySpot]) {
+    static func copyNotesToPasteboard(trip: Trip, allDays: [ItineraryDay]) {
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy/MM/dd"
-        let dateString = dateFormatter.string(from: Date())
-        
-        let emojis = ["☕", "🏺", "📸", "🍜", "🌲", "🏛️", "🍡"]
         
         // 1. 產生普通純文字 (作為 Fallback)
-        var plainText = "📍 Pubo ｜ \(tripTitle)\n────────────────────\n\n"
+        var plainText = "📍 | \(trip.title)\n\n"
         
         // 2. 產生 HTML 富文本
         var htmlString = """
         <div style="font-family: -apple-system, sans-serif; font-size: 16px;">
-        <p>📍 <b>Pubo ｜ \(tripTitle)</b><br>
-        ────────────────────</p>
+        <p><b>📍 | \(trip.title)</b></p>
         """
         
-        for (index, spot) in spots.enumerated() {
-            let emoji = emojis[index % emojis.count]
-            let spotNum = String(format: "%02d", index + 1)
-            let spotName = spot.name
-            
-            let desc = spot.notes?.first ?? (spot.category?.rawValue ?? "必訪景點")
-            
-            let encodedName = spotName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-            let placeId = spot.googlePlaceId ?? ""
-            let mapUrl = "https://www.google.com/maps/search/?api=1&query=\(encodedName)&query_place_id=\(placeId)"
-            
-            // Plain Text
-            plainText += "✨ \(spotNum) [ \(spotName) ] \(emoji)\n💡 備忘錄：\(desc)\n🗺️ 地圖導航：\(mapUrl)\n\n"
-            
-            // HTML
-            htmlString += """
-            <p>
-            ✨ <b>\(spotNum) [ \(spotName) ]</b> \(emoji)<br>
-            💡 備忘錄：\(desc)<br>
-            🗺️ 地圖導航：<a href="\(mapUrl)">點我開啟 Google Maps</a>
-            </p>
-            """
-        }
+        let startDate = trip.startDate ?? Date()
         
-        let footerStr = "📅 產出日期：\(dateString) ｜ 由 Pubo App 幫你打包"
-        plainText += footerStr
-        htmlString += "<p>\(footerStr)</p></div>"
+        for (index, day) in allDays.enumerated() {
+            let currentDayDate = Calendar.current.date(byAdding: .day, value: index, to: startDate) ?? startDate
+            let dateStr = dateFormatter.string(from: currentDayDate)
+            
+            plainText += "第\(index + 1)天 (\(dateStr))\n"
+            htmlString += "<p><b>第\(index + 1)天 (\(dateStr))</b><br>"
+            
+            let spots = day.spots.filter { $0.category != .accommodation }
+            if spots.isEmpty {
+                plainText += "當天沒有行程\n"
+                htmlString += "當天沒有行程<br>"
+            } else {
+                for spot in spots {
+                    let emoji: String
+                    switch spot.category {
+                    case .food: emoji = "🍽️ "
+                    case .shopping: emoji = "🛍️ "
+                    case .accommodation: emoji = "🏨 "
+                    case .transport: emoji = "🚌 "
+                    case .attraction: emoji = "📸 "
+                    default: emoji = ""
+                    }
+                    
+                    let cleanSpotName = spot.name.replacingOccurrences(of: "+", with: " ")
+                    let spotName = "\(emoji)\(cleanSpotName)"
+                    let timeStr = spot.time
+                    let stayStr = spot.stayDuration ?? "01時00分"
+                    
+                    let encodedName = cleanSpotName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+                    let placeId = spot.googlePlaceId ?? ""
+                    let mapUrl = "https://www.google.com/maps/search/?api=1&query=\(encodedName)&query_place_id=\(placeId)"
+                    
+                    plainText += "\(timeStr) \(spotName) (停留 \(stayStr))\n\(mapUrl)\n"
+                    htmlString += "\(timeStr) <a href=\"\(mapUrl)\">\(spotName)</a> (停留 \(stayStr))<br>"
+                }
+            }
+            
+            plainText += "\n"
+            htmlString += "</p>"
+        }
         
         // 3. 嘗試轉成 RTF data 以便精確寫入剪貼簿
         var items: [String: Any] = [

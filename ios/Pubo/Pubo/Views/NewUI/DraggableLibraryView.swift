@@ -5,11 +5,17 @@ struct DraggableLibraryView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \SDContent.createdAt, order: .reverse) private var sdContents: [SDContent]
     
+    enum LibraryViewMode {
+        case post
+        case place
+    }
+    
     // UI State
     @State private var offset: CGFloat = 0
     @State private var lastOffset: CGFloat = 0
     @GestureState private var gestureOffset: CGFloat = 0
     @State private var selectedFilter: String = "全部"
+    @State private var viewMode: LibraryViewMode = .post
     
     // Custom Category State
     @AppStorage("customLibraryCategories") private var customCategoriesRaw: String = "[]"
@@ -60,6 +66,14 @@ struct DraggableLibraryView: View {
         }
     }
     
+    var filteredPlaces: [SDPlace] {
+        var places: [SDPlace] = []
+        for content in filteredContents {
+            places.append(contentsOf: content.places.filter { $0.isSaved })
+        }
+        return places
+    }
+    
     var body: some View {
         GeometryReader { proxy in
             let height = proxy.frame(in: .global).height
@@ -101,10 +115,24 @@ struct DraggableLibraryView: View {
                                 .font(.system(size: 24, weight: .black))
                                 .foregroundColor(PuboColors.navy)
                             Spacer()
-                            Image(systemName: "chevron.up")
-                                .font(.system(size: 20, weight: .bold))
-                                .foregroundColor(PuboColors.navy)
-                                .rotationEffect(.degrees(offset < height / 2 ? 180 : 0))
+                            
+                            // View Mode Menu
+                            Menu {
+                                Button(action: { withAnimation { viewMode = .post } }) {
+                                    Label("貼文內容", systemImage: "doc.text.image")
+                                }
+                                Button(action: { withAnimation { viewMode = .place } }) {
+                                    Label("單獨地點", systemImage: "mappin.and.ellipse")
+                                }
+                            } label: {
+                                Image("filter")
+                                    .resizable()
+                                    .renderingMode(.template)
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(width: 20, height: 20)
+                                    .foregroundColor(PuboColors.navy)
+                                    .padding(.trailing, 8)
+                            }
                         }
                     }
                     .padding(.horizontal, 24)
@@ -131,9 +159,10 @@ struct DraggableLibraryView: View {
                                         .clipShape(Circle())
                                 }
                             }
-                            .padding(.horizontal, 24)
+                            .padding(.horizontal, 2)
                             .padding(.vertical, 6)
                         }
+                        .padding(.horizontal, 24)
                         .padding(.bottom, 12)
                     }
                     
@@ -162,6 +191,46 @@ struct DraggableLibraryView: View {
                             Spacer()
                         }
                         .frame(maxWidth: .infinity)
+                    } else if viewMode == .place {
+                        // List of Places
+                        ScrollView {
+                            LazyVStack(spacing: 12) {
+                                ForEach(filteredPlaces) { place in
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(place.name)
+                                                .font(.headline)
+                                                .foregroundColor(.black)
+                                            Text((place.address?.isEmpty == false) ? place.address! : "暫無詳細地址")
+                                                .font(.caption)
+                                                .foregroundColor(.gray)
+                                                .lineLimit(2)
+                                        }
+                                        Spacer()
+                                        Image(systemName: "chevron.right")
+                                            .foregroundColor(.gray.opacity(0.5))
+                                            .font(.system(size: 14))
+                                    }
+                                    .padding(16)
+                                    .background(Color.white)
+                                    .cornerRadius(12)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12)
+                                            .stroke(Color.gray.opacity(0.1), lineWidth: 1)
+                                    )
+                                    .shadow(color: .black.opacity(0.02), radius: 5, y: 2)
+                                    .padding(.horizontal, 24)
+                                    .onTapGesture {
+                                        NotificationCenter.default.post(name: NSNotification.Name("FocusMapOnPlace"), object: place)
+                                        withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
+                                            offset = proxy.frame(in: .global).height - collapsedHeight
+                                        }
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 8)
+                            .padding(.bottom, 120) // Bottom padding for safe area
+                        }
                     } else {
                         // Content Grid
                         ScrollView {
@@ -175,12 +244,17 @@ struct DraggableLibraryView: View {
                                         }
                                     }) {
                                         LibraryCard(content: content, isSelectionMode: isSelectionMode, targetCategory: targetCategoryForSelection) {
-                                            // On Add (Selection Mode) - Redundant if card handles click? 
-                                            // LibraryCard onAdd is for the + button only.
                                             assignCategory(content: content)
                                         }
                                     }
                                     .buttonStyle(.plain)
+                                    .contextMenu {
+                                        Button(role: .destructive) {
+                                            deleteContent(content)
+                                        } label: {
+                                            Label("刪除貼文", systemImage: "trash")
+                                        }
+                                    }
                                 }
                             }
                             .padding(.horizontal, 24)
@@ -217,6 +291,7 @@ struct DraggableLibraryView: View {
                     offset = expandedOffset
                 }
             }
+            // CustomCategoryAdded is handled implicitly by @AppStorage changes if any
             .sheet(item: $selectedContent) { content in
                 LibraryDetailView(content: content)
                     .presentationDetents([.fraction(0.9), .large])
@@ -248,6 +323,16 @@ struct DraggableLibraryView: View {
         }
     }
     
+    // MARK: - Helpers
+    
+    private func deleteContent(_ content: SDContent) {
+        if let url = content.sourceUrl {
+            Task {
+                await DataService.shared.removeFromCollection(url: url)
+            }
+        }
+    }
+
     private func enterSelectionMode() {
         guard selectedFilter != "全部" && !defaultFilters.contains(selectedFilter) else { return }
         let categoryName = selectedFilter
@@ -314,7 +399,7 @@ struct LibraryCard: View {
             ZStack(alignment: .topTrailing) {
                 Group {
                     if let urlStr = content.previewThumbnailUrl, !urlStr.isEmpty {
-                        AsyncImage(url: URL(string: urlStr)) { img in
+                        CachedAsyncImage(url: URL(string: urlStr)) { img in
                             img.resizable()
                                 .aspectRatio(contentMode: .fill)
                                 .frame(maxWidth: .infinity, minHeight: 200, maxHeight: 200)
